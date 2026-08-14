@@ -3,19 +3,22 @@ on:
   push:
   pull_request:
 jobs:
-  build:
+  msvc:
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: MSVC environment + build Bend
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Build Bend (MSVC)
         shell: cmd
         run: |
           for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do (
             call "%%i\VC\Auxiliary\Build\vcvars64.bat"
           )
           set RUSTFLAGS=-C linker=link.exe
-          cargo build --release --features cli
+          cargo build --release --features cli --target x86_64-pc-windows-msvc
       - name: Install HVM2 (this fork)
         shell: cmd
         run: |
@@ -24,11 +27,32 @@ jobs:
           )
           set RUSTFLAGS=-C linker=link.exe
           cargo install --git https://github.com/Lyamc/HVM2 --locked
+      - name: Check + run-rs hello
+        shell: cmd
+        run: |
+          target\x86_64-pc-windows-msvc\release\bend.exe check examples\hello_world.bend
+          target\x86_64-pc-windows-msvc\release\bend.exe run-rs examples\hello_world.bend
+
+  gnu:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils
+          path-type: inherit
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - name: Build Bend (GNU)
+        env:
+          CC: gcc
+        run: cargo build --release --features cli --target x86_64-pc-windows-gnu
       - name: Check hello
-        shell: cmd
-        run: |
-          target\release\bend.exe check examples\hello_world.bend
-      - name: Run hello (Rust HVM)
-        shell: cmd
-        run: |
-          target\release\bend.exe run-rs examples\hello_world.bend
+        run: target/x86_64-pc-windows-gnu/release/bend.exe check examples/hello_world.bend

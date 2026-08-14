@@ -21,7 +21,7 @@ Bend is powered by the [HVM2](https://github.com/higherorderco/hvm) runtime.
 * Bend is designed to excel in scaling performance with cores, supporting over 10000 concurrent threads.
 * The current version may have lower single-core performance.
 * You can expect substantial improvements in performance as we advance our code generation and optimization techniques.
-* Windows is supported via this fork and [Lyamc/HVM2](https://github.com/Lyamc/HVM2). `bend run-rs` (Rust HVM) always works. `bend run-c` works when HVM2 is built with MSVC (`cl` + `/std:c11 /experimental:c11atomics`; needs several GB of RAM). Put `hvm.exe` on `PATH`, next to `bend.exe`, or in `%USERPROFILE%\.cargo\bin`. If rustc's `lld-link` fails against the VS CRT, use `RUSTFLAGS=-C linker=link.exe` after `vcvars64`.
+* Windows is supported via this fork and [Lyamc/HVM2](https://github.com/Lyamc/HVM2), on both MSVC and GNU/MinGW. `bend run-rs` always works. `bend run-c` works when HVM2's C runtime was compiled (MSVC `cl` + C11 atomics, or MinGW `gcc -std=c11`; needs several GB of RAM). Put `hvm.exe` on `PATH`, next to `bend.exe`, or in `%CARGO_HOME%\bin`. If rustc's `lld-link` fails against the VS CRT, use `RUSTFLAGS=-C linker=link.exe` after `vcvars64`.
 * [We only support NVIDIA Gpus currently](https://github.com/HigherOrderCO/Bend/issues/341).
 
 
@@ -51,7 +51,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 brew install gcc
 ```
 
-#### On Windows
+#### On Windows (MSVC)
 ```bat
 :: Visual Studio 2022 with Desktop C++ (for cl.exe / link.exe)
 call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
@@ -60,6 +60,14 @@ set RUSTFLAGS=-C linker=link.exe
 ```
 
 Keep `PATH` short before `vcvars64` if you see `The input line is too long`.
+
+#### On Windows (GNU / MinGW)
+```bat
+rustup target add x86_64-pc-windows-gnu
+set CC=gcc
+```
+
+`--release` / `cargo install` uses `opt-level = 3`, fat LTO, `codegen-units = 1`, and `strip = true`. Windows targets also pass `/OPT:REF /OPT:ICF` (MSVC) or `--gc-sections` (GNU).
 
 
 ### Install Bend
@@ -75,7 +83,9 @@ cargo install --git https://github.com/Lyamc/Bend --locked
 bend --version
 ```
 
-On Windows, either add both install dirs to `PATH` or copy `hvm.exe` next to `bend.exe`. `bend` also looks in `%USERPROFILE%\.cargo\bin`. Use `bend run-rs` if you have not built HVM's C runtime (MSVC C11 atomics + several GB of RAM).
+On Windows, either add both install dirs to `PATH` or copy `hvm.exe` next to `bend.exe`. `bend` also looks in `%CARGO_HOME%\bin` (default `%USERPROFILE%\.cargo\bin`). Use `bend run-rs` if you have not built HVM's C runtime.
+
+For a GNU build, add `--target x86_64-pc-windows-gnu` to both `cargo install` commands.
 
 ### Getting Started
 #### Running Bend Programs

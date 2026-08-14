@@ -45,27 +45,33 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 brew install gcc
 ```
 
+#### On Windows
+
+MSVC (default `rustup` toolchain): Visual Studio 2022 Desktop C++, then `vcvars64`. If `lld-link` fails against the VS CRT, `set RUSTFLAGS=-C linker=link.exe`.
+
+GNU / MinGW: `rustup target add x86_64-pc-windows-gnu` and a MinGW-w64 `gcc` on `PATH` (`set CC=gcc`).
+
+Install this fork of HVM2 and Bend (see the README). `--release` enables LTO, `opt-level = 3`, one codegen unit, and symbol stripping.
+
 ### Install Bend
 
 1. Install HVM2 by running:
 
 ```sh
-# HVM2 is HOC's massively parallel Interaction Combinator evaluator.
-cargo install hvm
-
-# This ensures HVM is correctly installed and accessible.
+# This fork (Windows-capable). Official crate: cargo install hvm
+cargo install --git https://github.com/Lyamc/HVM2 --locked
 hvm --version
 ```
 
 2. Install Bend by running:
 
 ```sh
-# This command will install Bend
-cargo install bend-lang
-
-# This ensures Bend is correctly installed and accessible.
+# This fork (Windows-capable). Official crate: cargo install bend-lang
+cargo install --git https://github.com/Lyamc/Bend --locked
 bend --version
 ```
+
+On GNU/MinGW, add `--target x86_64-pc-windows-gnu` to both commands.
 
 ## Hello, World!
 

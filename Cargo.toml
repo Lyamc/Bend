@@ -17,7 +17,10 @@ path = "src/main.rs"
 required-features = ["cli"]
 
 [profile.release]
+opt-level = 3
 lto = true
+codegen-units = 1
+strip = true
 
 [features]
 default = ["cli"]
