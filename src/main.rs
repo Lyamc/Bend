@@ -1,5 +1,5 @@
 use bend::{
-  check_book, compile_book, desugar_book,
+  check_book, compile_book, default_hvm_path, desugar_book, hvm_temp_file,
   diagnostics::{Diagnostics, DiagnosticsConfig, Severity},
   fun::{Book, Name},
   hvm::hvm_book_show_pretty,
@@ -279,7 +279,7 @@ fn execute_cli_mode(mut cli: Cli) -> Result<(), Diagnostics> {
   } else if let Ok(hvm_bin) = std::env::var("HVM_BIN") {
     hvm_bin
   } else {
-    "hvm".to_string()
+    default_hvm_path()
   };
 
   let gen_cmd = match &cli.mode {
@@ -362,21 +362,21 @@ fn execute_cli_mode(mut cli: Cli) -> Result<(), Diagnostics> {
       let mut book = load_book(&path, diagnostics_cfg)?;
       let compile_res = compile_book(&mut book, opts, diagnostics_cfg, None)?;
 
-      let out_path = ".out.hvm";
-      std::fs::write(out_path, hvm_book_show_pretty(&compile_res.hvm_book)).map_err(|x| x.to_string())?;
+      let out_path = hvm_temp_file();
+      std::fs::write(&out_path, hvm_book_show_pretty(&compile_res.hvm_book)).map_err(|x| x.to_string())?;
 
-      let gen_fn = |out_path: &str| {
-        let mut process = std::process::Command::new(hvm_bin);
+      let gen_fn = |out_path: &std::path::Path| {
+        let mut process = std::process::Command::new(&hvm_bin);
         process.arg(gen_cmd).arg(out_path);
         process.output().map_err(|e| format!("While running hvm: {e}"))
       };
 
-      let std::process::Output { stdout, stderr, status } = gen_fn(out_path)?;
+      let std::process::Output { stdout, stderr, status } = gen_fn(&out_path)?;
       let out = String::from_utf8_lossy(&stdout);
       let err = String::from_utf8_lossy(&stderr);
       let status = if !status.success() { status.to_string() } else { String::new() };
 
-      if let Err(e) = std::fs::remove_file(out_path) {
+      if let Err(e) = std::fs::remove_file(&out_path) {
         eprintln!("Error removing HVM output file. {e}");
       }
 

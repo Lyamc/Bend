@@ -21,7 +21,7 @@ Bend is powered by the [HVM2](https://github.com/higherorderco/hvm) runtime.
 * Bend is designed to excel in scaling performance with cores, supporting over 10000 concurrent threads.
 * The current version may have lower single-core performance.
 * You can expect substantial improvements in performance as we advance our code generation and optimization techniques.
-* We are still working to support Windows. Use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) as an alternative solution.
+* Windows is supported via this fork and [Lyamc/HVM2](https://github.com/Lyamc/HVM2). `bend run-rs` (Rust HVM) always works. `bend run-c` works when HVM2 is built with MSVC (`cl` + `/std:c11 /experimental:c11atomics`; needs several GB of RAM). Put `hvm.exe` on `PATH`, next to `bend.exe`, or in `%USERPROFILE%\.cargo\bin`. If rustc's `lld-link` fails against the VS CRT, use `RUSTFLAGS=-C linker=link.exe` after `vcvars64`.
 * [We only support NVIDIA Gpus currently](https://github.com/HigherOrderCO/Bend/issues/341).
 
 
@@ -51,25 +51,31 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 brew install gcc
 ```
 
+#### On Windows
+```bat
+:: Visual Studio 2022 with Desktop C++ (for cl.exe / link.exe)
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+:: If rustc's lld-link fails against the VS CRT:
+set RUSTFLAGS=-C linker=link.exe
+```
+
+Keep `PATH` short before `vcvars64` if you see `The input line is too long`.
+
 
 ### Install Bend
 
-1. Install HVM2 by running:
+1. Install HVM2 (this fork) by running:
 ```sh
-# HVM2 is HOC's massively parallel Interaction Combinator evaluator.
-cargo install hvm
-
-# This ensures HVM is correctly installed and accessible.
+cargo install --git https://github.com/Lyamc/HVM2 --locked
 hvm --version
 ```
-2. Install Bend by running:
+2. Install Bend (this fork) by running:
 ```sh
-# This command will install Bend
-cargo install bend-lang
-
-# This ensures Bend is correctly installed and accessible.
+cargo install --git https://github.com/Lyamc/Bend --locked
 bend --version
 ```
+
+On Windows, either add both install dirs to `PATH` or copy `hvm.exe` next to `bend.exe`. `bend` also looks in `%USERPROFILE%\.cargo\bin`. Use `bend run-rs` if you have not built HVM's C runtime (MSVC C11 atomics + several GB of RAM).
 
 ### Getting Started
 #### Running Bend Programs

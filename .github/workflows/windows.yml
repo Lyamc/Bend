@@ -1,0 +1,34 @@
+name: windows
+on:
+  push:
+  pull_request:
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: MSVC environment + build Bend
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do (
+            call "%%i\VC\Auxiliary\Build\vcvars64.bat"
+          )
+          set RUSTFLAGS=-C linker=link.exe
+          cargo build --release --features cli
+      - name: Install HVM2 (this fork)
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do (
+            call "%%i\VC\Auxiliary\Build\vcvars64.bat"
+          )
+          set RUSTFLAGS=-C linker=link.exe
+          cargo install --git https://github.com/Lyamc/HVM2 --locked
+      - name: Check hello
+        shell: cmd
+        run: |
+          target\release\bend.exe check examples\hello_world.bend
+      - name: Run hello (Rust HVM)
+        shell: cmd
+        run: |
+          target\release\bend.exe run-rs examples\hello_world.bend

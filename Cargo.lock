@@ -193,8 +193,7 @@ checksum = "809e18805660d7b6b2e2b9f316a5099521b5998d5cba4dda11b5157a21aaef03"
 [[package]]
 name = "hvm"
 version = "2.0.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fafa02949c005e70869074ac9db489ad92eaf92c78b4dcf6c0b45d98982c08d"
+source = "git+https://github.com/Lyamc/HVM2?branch=main#e685aceec4d8afce65d039866ec11690b46c84e3"
 dependencies = [
  "TSPL",
  "cc",

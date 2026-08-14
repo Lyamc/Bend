@@ -218,13 +218,22 @@ pub fn readback_hvm_net(
   (term, diags)
 }
 
+/// Unique temp file so concurrent `bend` processes do not clobber each other.
+pub fn hvm_temp_file() -> std::path::PathBuf {
+  use std::sync::atomic::{AtomicU64, Ordering};
+  static N: AtomicU64 = AtomicU64::new(0);
+  let n = N.fetch_add(1, Ordering::Relaxed);
+  std::env::temp_dir().join(format!("bend-{}-{n}.hvm", std::process::id()))
+}
+
 /// Runs an HVM book by invoking HVM as a subprocess.
 fn run_hvm(book: &::hvm::ast::Book, cmd: &str, run_opts: &RunOpts) -> Result<String, String> {
-  let out_path = ".out.hvm";
-  std::fs::write(out_path, hvm_book_show_pretty(book)).map_err(|x| x.to_string())?;
+  let out_path = hvm_temp_file();
+  std::fs::write(&out_path, hvm_book_show_pretty(book)).map_err(|x| x.to_string())?;
   let mut process = std::process::Command::new(run_opts.hvm_path.clone())
     .arg(cmd)
-    .arg(out_path)
+    .arg(&out_path)
+    .stdin(std::process::Stdio::null())
     .stdout(std::process::Stdio::piped())
     .stderr(std::process::Stdio::inherit())
     .spawn()
@@ -234,7 +243,7 @@ fn run_hvm(book: &::hvm::ast::Book, cmd: &str, run_opts: &RunOpts) -> Result<Str
   let thread_out = std::thread::spawn(move || filter_hvm_output(child_out, std::io::stdout()));
 
   let _ = process.wait().expect("Failed to wait on hvm subprocess");
-  if let Err(e) = std::fs::remove_file(out_path) {
+  if let Err(e) = std::fs::remove_file(&out_path) {
     eprintln!("Error removing HVM output file. {e}");
   }
 
@@ -244,12 +253,15 @@ fn run_hvm(book: &::hvm::ast::Book, cmd: &str, run_opts: &RunOpts) -> Result<Str
 
 /// Reads the final output from HVM and separates the extra information.
 fn parse_hvm_output(out: &str) -> Result<(::hvm::ast::Net, String), String> {
+  // Windows C runtimes historically emit CRLF; accept both.
+  let out = out.replace('\r', "");
   let Some((result, stats)) = out.split_once('\n') else {
     return Err(format!(
       "Failed to parse result from HVM (unterminated result).\nOutput from HVM was:\n{:?}",
       out
     ));
   };
+  let result = result.trim();
   let mut p = ::hvm::ast::CoreParser::new(result);
   let Ok(net) = p.parse_net() else {
     return Err(format!("Failed to parse result from HVM (invalid net).\nOutput from HVM was:\n{:?}", out));
@@ -265,8 +277,7 @@ fn filter_hvm_output(
   mut stream: impl std::io::Read + Send,
   mut output: impl std::io::Write + Send,
 ) -> Result<String, String> {
-  let mut capturing = false;
-  let mut result = String::new();
+  let mut pending = String::new();
   let mut buf = [0u8; 1024];
   loop {
     let num_read = match stream.read(&mut buf) {
@@ -279,33 +290,46 @@ fn filter_hvm_output(
     if num_read == 0 {
       break;
     }
-    let new_buf = &buf[..num_read];
-    // TODO: Does this lead to broken characters if printing too much at once?
-    let new_str = String::from_utf8_lossy(new_buf);
-    if capturing {
-      // Store the result
-      result.push_str(&new_str);
-    } else if let Some((before, after)) = new_str.split_once(HVM_OUTPUT_END_MARKER) {
-      // If result started in the middle of the buffer, print what came before and start capturing.
-      if let Err(e) = output.write_all(before.as_bytes()) {
-        eprintln!("Error writing HVM output. {e}");
-      };
-      result.push_str(after);
-      capturing = true;
-    } else {
-      // Otherwise, don't capture anything
-      if let Err(e) = output.write_all(new_buf) {
+    pending.push_str(&String::from_utf8_lossy(&buf[..num_read]));
+    // Marker may arrive split across reads; search the accumulated text.
+    if pending.contains(HVM_OUTPUT_END_MARKER) {
+      break;
+    }
+    // Keep a tail so a split marker is not lost, and emit the rest as user IO.
+    let keep = HVM_OUTPUT_END_MARKER.len().saturating_sub(1);
+    if pending.len() > keep {
+      let split_at = pending.len() - keep;
+      if let Err(e) = output.write_all(pending[..split_at].as_bytes()) {
         eprintln!("Error writing HVM output. {e}");
       }
+      pending.replace_range(..split_at, "");
     }
   }
 
-  if capturing {
+  if let Some((before, after)) = pending.split_once(HVM_OUTPUT_END_MARKER) {
+    if let Err(e) = output.write_all(before.as_bytes()) {
+      eprintln!("Error writing HVM output. {e}");
+    }
+    output.flush().map_err(|e| format!("Error flushing HVM output. {e}"))?;
+    // Remainder of this buffer plus anything still in the pipe.
+    let mut result = after.replace('\r', "");
+    loop {
+      let num_read = match stream.read(&mut buf) {
+        Ok(n) => n,
+        Err(_) => break,
+      };
+      if num_read == 0 {
+        break;
+      }
+      result.push_str(&String::from_utf8_lossy(&buf[..num_read]).replace('\r', ""));
+    }
     Ok(result)
   } else {
+    if let Err(e) = output.write_all(pending.as_bytes()) {
+      eprintln!("Error writing HVM output. {e}");
+    }
     output.flush().map_err(|e| format!("Error flushing HVM output. {e}"))?;
-    let msg = "HVM output had no result (An error likely occurred)".to_string();
-    Err(msg)
+    Err("HVM output had no result (An error likely occurred)".to_string())
   }
 }
 
@@ -318,8 +342,38 @@ pub struct RunOpts {
 
 impl Default for RunOpts {
   fn default() -> Self {
-    RunOpts { linear_readback: false, pretty: false, hvm_path: "hvm".to_string() }
+    RunOpts { linear_readback: false, pretty: false, hvm_path: default_hvm_path() }
   }
+}
+
+/// Resolve the HVM binary for this platform.
+///
+/// Search order: sibling of `bend`, `$CARGO_HOME/bin`, then `hvm`/`hvm.exe` on PATH.
+pub fn default_hvm_path() -> String {
+  let exe_name = if cfg!(windows) { "hvm.exe" } else { "hvm" };
+
+  if let Ok(exe) = std::env::current_exe() {
+    if let Some(dir) = exe.parent() {
+      let local = dir.join(exe_name);
+      if local.is_file() {
+        return local.to_string_lossy().into_owned();
+      }
+    }
+  }
+
+  let cargo_home = std::env::var_os("CARGO_HOME").map(std::path::PathBuf::from).or_else(|| {
+    std::env::var_os("USERPROFILE")
+      .or_else(|| std::env::var_os("HOME"))
+      .map(|h| std::path::PathBuf::from(h).join(".cargo"))
+  });
+  if let Some(home) = cargo_home {
+    let cargo_hvm = home.join("bin").join(exe_name);
+    if cargo_hvm.is_file() {
+      return cargo_hvm.to_string_lossy().into_owned();
+    }
+  }
+
+  exe_name.to_string()
 }
 
 #[derive(Clone, Copy, Debug, Default)]
