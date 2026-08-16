@@ -6,8 +6,9 @@
 2. [Important Notes](#important-notes)
 3. [Install](#install)
 4. [Getting Started](#getting-started)
-5. [Speedup Example](#speedup-examples)
-6. [Additional Resources](#additional-resources)
+5. [Performance (this machine)](#performance-this-machine)
+6. [Speedup Example](#speedup-examples)
+7. [Additional Resources](#additional-resources)
 
 ## Introduction
 
@@ -22,7 +23,7 @@ Bend is powered by the [HVM2](https://github.com/higherorderco/hvm) runtime.
 * The current version may have lower single-core performance.
 * You can expect substantial improvements in performance as we advance our code generation and optimization techniques.
 * Windows is supported via this fork and [Lyamc/HVM2](https://github.com/Lyamc/HVM2), on both MSVC and GNU/MinGW. `bend run-rs` always works. `bend run-c` works when HVM2's C runtime was compiled (MSVC `cl` + C11 atomics, or MinGW `gcc -std=c11`; needs several GB of RAM). Put `hvm.exe` on `PATH`, next to `bend.exe`, or in `%CARGO_HOME%\bin`. If rustc's `lld-link` fails against the VS CRT, use `RUSTFLAGS=-C linker=link.exe` after `vcvars64`.
-* [We only support NVIDIA Gpus currently](https://github.com/HigherOrderCO/Bend/issues/341).
+* This fork also has `bend run-wgpu` (WebGPU / DX12 / Vulkan / Metal via HVM2). It runs the same `.bend` files as `run-cu`. NVIDIA CUDA (`run-cu`) is still the faster GPU path when `nvcc` is available.
 
 
 
@@ -94,9 +95,10 @@ bend run    <file.bend> # uses the C interpreter by default (parallel)
 bend run-rs <file.bend> # uses the Rust interpreter (sequential)
 bend run-c  <file.bend> # uses the C interpreter (parallel)
 bend run-cu <file.bend> # uses the CUDA interpreter (massively parallel)
+bend run-wgpu <file.bend> # uses the WebGPU / wgpu interpreter (same .bend files)
 
 # Notes
-# You can also compile Bend to standalone C/CUDA files using gen-c and gen-cu for maximum performance.
+# You can also compile Bend to standalone C/CUDA/Rust files using gen-c, gen-cu, and gen-rs for maximum performance.
 # The code generator is still in its early stages and not as mature as compilers like GCC and GHC.
 # You can use the -s flag to have more information on
   # Reductions
@@ -200,10 +202,64 @@ bend run-cu parallel_sum.bend -s
 In Bend, it can be parallelized by just changing the run command. If your code **can** run in parallel it **will** run in parallel.
 
 
+### Performance (this machine)
+
+Measured on **Windows**, **RTX 3060 (sm_86)**, from `C:\Build\perf_test` (Lyamc/Bend 0.2.38 + Lyamc/HVM2 2.0.22). Hello/fib columns are **wall** (process start + device setup). Sieve/sort columns are HVM **`TIME` / MIPS** (evaluator only). Same `bend/*.bend` sources, no program edits.
+
+| Program | What it does | Bend result | Native GPU result |
+|---|---|---|---|
+| hello | print a string | `"Hello, World!"` | `Hello, World!` |
+| fibonacci | iterative Fib **n=42** | **`16256056`** (HVM **u24** wrap) | **`267914296`** |
+| prime_sieve | primes ≤ **1e6** | **78498** | **78498** |
+| sorting | Bend: bitonic **2^18** LCG tree; native GPU: **1e6** LCG ints | **`(13, 16777104)`** | first **3842**, last **2147480074** |
+
+**Sort is not the same problem** on Bend vs the handwritten GPU kernels. Compare Bend backends to each other on sort; compare GPU natives to each other on the 1e6 LCG sort.
+
+#### Bend / HVM2 interpreters and compilers
+
+CPU backends default to **8** workers (`min(8, 2^floor(log2(physical)))`). CUDA is 16 384 threads. Hello/fib are wall ms.
+
+| Backend | Kind | hello | fib | sieve | sort |
+|---|---|---:|---:|---|---|
+| `run` / `run-rs` | interpreted Rust | 8 ms | 6 ms | **2.03 s** / 381 MIPS | **8.16 s** / 188 MIPS |
+| `run-c` | interpreted C (TPC=16, 8 live) | 7 ms | 6 ms | **2.12 s** / 366 MIPS | **9.23 s** / 166 MIPS |
+| `run-cu` | interpreted CUDA | 434 ms | 411 ms | **36.07 s** / 21 MIPS | **6.94 s** / 221 MIPS |
+| `run-wgpu` | interpreted WebGPU (4096 lanes) | 795 ms | 831 ms | DNF (OOM / TDR / not competitive) | not run |
+| `gen-c` | compiled C (`cl /O2`) | 11 ms | 9 ms | **1.47 s** / 529 MIPS | **5.32 s** / 289 MIPS |
+| `gen-rs` | compiled Rust (`rustc -O -C lto=thin -C target-cpu=native`) | 9 ms | 9 ms | **1.79 s** / 434 MIPS | **6.13 s** / 251 MIPS |
+| `gen-cu` | standalone CUDA (same interpreter as `run-cu`) | 427 ms | 418 ms | **36.16 s** / 21 MIPS | **6.97 s** / 220 MIPS |
+
+Compile time (not in the run columns): `gen-c` ~0.3–0.4 s, `gen-rs` ~1.4–4.4 s, `gen-cu` ~18.5 s (`nvcc`).
+
+`run-c` sieve was **8.54 s** in the suite pass (same 775 M ITRS) and **2.12 s** on an immediate `--threads 8` repeat. `run-rs` at `--threads 16` was sieve **1.60 s** / 485 MIPS, sort **5.38 s** / 286 MIPS.
+
+What that says:
+
+- **Fastest Bend sieve** in the suite is **`gen-c` (1.47 s)**, then **`gen-rs` (1.79 s)** and **`run-rs` (2.03 s)**.
+- **Fastest Bend sort** in the suite is **`gen-c` (5.32 s)**, then **`gen-rs` (6.13 s)**, then **`run-cu` / `gen-cu` (~6.9 s)**.
+- **`run-rs` is now in the same band as `run-c`** (the C-style hbag / steal pool landed on the interpreter too).
+- **`run-cu` / `gen-cu` pay ~0.4 s** just to allocate the CUDA net; they still win on the *balanced* bitonic sort vs the interpreted CPU paths, not on the sieve.
+- **`gen-cu` is not a faster CUDA evaluator** — it embeds the same interpreted CUDA runtime as `run-cu`.
+- **`run-wgpu`** hello/fib match ITRS; sieve/sort still DNF. Same `.bend` files, no program edits.
+
+#### Other GPU programs in the same suite (not Bend)
+
+These are handwritten kernels for the *native* problems (full Fib 42, 1e6 sieve, 1e6 LCG sort). Times are **wall ms** and are mostly **device init**, not kernel work.
+
+| Implementation | hello | fib | sieve 1e6 | sort 1e6 |
+|---|---:|---:|---:|---:|
+| Handwritten PTX (CUDA sm_86 + `ptx_run`) | 133 ms | 149 ms | 132 ms | 141 ms |
+| Vulkan (ash / SPIR-V) | 162 ms | 164 ms | 187 ms | 396 ms |
+| wgpu 30 (WGSL compute) | 548 ms | 558 ms | 577 ms | 590 ms |
+
+PTX and Vulkan finish the real 1e6 sieve/sort in well under the process-start tax. wgpu’s ~0.6 s is almost all adapter/device setup. None of these run Bend or HVM.
+
 ### Speedup Examples
 The code snippet below implements a [bitonic sorter](https://en.wikipedia.org/wiki/Bitonic_sorter) with *immutable tree rotations*. It's not the type of algorithm you would expect to run fast on GPUs. However, since it uses a divide and conquer approach, which is inherently parallel, Bend will execute it on multiple threads, no thread creation, no explicit lock management.
 
-#### Bitonic Sorter Benchmark
+#### Bitonic Sorter Benchmark (upstream)
+
+See [Performance (this machine)](#performance-this-machine) for numbers from this Windows / RTX 3060 suite. Upstream:
 
 - `bend run-rs`: CPU, Apple M3 Max: 12.15 seconds
 - `bend run-c`: CPU, Apple M3 Max: 0.96 seconds

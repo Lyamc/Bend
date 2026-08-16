@@ -54,12 +54,16 @@ enum Mode {
   RunC(RunArgs),
   /// Compiles the program and runs it with the Cuda HVM implementation.
   RunCu(RunArgs),
+  /// Compiles the program and runs it with the WebGPU / wgpu HVM implementation.
+  RunWgpu(RunArgs),
   /// Compiles the program to hvm and prints to stdout.
   GenHvm(GenArgs),
   /// Compiles the program to standalone C and prints to stdout.
   GenC(GenArgs),
   /// Compiles the program to standalone Cuda and prints to stdout.
   GenCu(GenArgs),
+  /// Compiles the program to standalone Rust and prints to stdout.
+  GenRs(GenArgs),
   /// Runs the lambda-term level desugaring passes.
   Desugar {
     #[arg(
@@ -285,6 +289,7 @@ fn execute_cli_mode(mut cli: Cli) -> Result<(), Diagnostics> {
   let gen_cmd = match &cli.mode {
     Mode::GenC(..) => "gen-c",
     Mode::GenCu(..) => "gen-cu",
+    Mode::GenRs(..) => "gen-rs",
     _ => "gen",
   };
 
@@ -292,6 +297,7 @@ fn execute_cli_mode(mut cli: Cli) -> Result<(), Diagnostics> {
     Mode::RunC(..) => "run-c",
     Mode::RunRs(..) => "run",
     Mode::RunCu(..) => "run-cu",
+    Mode::RunWgpu(..) => "run-wgpu",
     _ => "run-c",
   };
 
@@ -326,6 +332,7 @@ fn execute_cli_mode(mut cli: Cli) -> Result<(), Diagnostics> {
 
     Mode::RunC(RunArgs { pretty, run_opts, comp_opts, warn_opts, path, arguments })
     | Mode::RunCu(RunArgs { pretty, run_opts, comp_opts, warn_opts, path, arguments })
+    | Mode::RunWgpu(RunArgs { pretty, run_opts, comp_opts, warn_opts, path, arguments })
     | Mode::RunRs(RunArgs { pretty, run_opts, comp_opts, warn_opts, path, arguments }) => {
       let CliRunOpts { linear, print_stats } = run_opts;
 
@@ -355,7 +362,8 @@ fn execute_cli_mode(mut cli: Cli) -> Result<(), Diagnostics> {
     }
 
     Mode::GenC(GenArgs { comp_opts, warn_opts, path })
-    | Mode::GenCu(GenArgs { comp_opts, warn_opts, path }) => {
+    | Mode::GenCu(GenArgs { comp_opts, warn_opts, path })
+    | Mode::GenRs(GenArgs { comp_opts, warn_opts, path }) => {
       let diagnostics_cfg = set_warning_cfg_from_cli(DiagnosticsConfig::default(), warn_opts);
       let opts = compile_opts_from_cli(&comp_opts, compiler_target);
 
