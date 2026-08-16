@@ -1,5 +1,9 @@
-<h1 >Bend</h1>
+<h1>Bend</h1>
 <p>A high-level, massively parallel programming language</p>
+
+This repository is an **independent fork** of [HigherOrderCO/Bend](https://github.com/HigherOrderCO/Bend), paired with [Lyamc/HVM2](https://github.com/Lyamc/HVM2). The goal is broader **platform support** (especially Windows, MSVC and GNU) and **better runtime performance** than the upstream main branch. Most of the porting, backends, and measurement work was done with AI assistance.
+
+Upstream Bend and HVM remain the language and paper of record. This fork is not the official HigherOrderCO project.
 
 ## Index
 1. [Introduction](#introduction)
@@ -12,21 +16,33 @@
 
 ## Introduction
 
-Bend offers the feel and features of expressive languages like Python and Haskell. This includes fast object allocations, full support for higher-order functions with closures, unrestricted recursion, and even continuations.                             
-Bend scales like CUDA, it runs on massively parallel hardware like GPUs, with nearly linear acceleration based on core count, and without explicit parallelism annotations: no thread creation, locks, mutexes, or atomics.                     
-Bend is powered by the [HVM2](https://github.com/higherorderco/hvm) runtime.
+Bend has the feel of languages like Python and Haskell: fast object allocations, higher-order functions with closures, unrestricted recursion, and continuations.
 
+It is meant to scale like CUDA on massively parallel hardware, without explicit parallelism annotations — no thread creation, locks, mutexes, or atomics in the source. A program that *can* run in parallel *will* run in parallel on a parallel backend.
+
+The runtime is [HVM2](https://github.com/Lyamc/HVM2) (this fork). Upstream HVM2 is [HigherOrderCO/HVM](https://github.com/higherorderco/hvm).
 
 ## Important Notes
 
-* Bend is designed to excel in scaling performance with cores, supporting over 10000 concurrent threads.
-* The current version may have lower single-core performance.
-* You can expect substantial improvements in performance as we advance our code generation and optimization techniques.
-* Windows is supported via this fork and [Lyamc/HVM2](https://github.com/Lyamc/HVM2), on both MSVC and GNU/MinGW. `bend run-rs` always works. `bend run-c` works when HVM2's C runtime was compiled (MSVC `cl` + C11 atomics, or MinGW `gcc -std=c11`; needs several GB of RAM). Put `hvm.exe` on `PATH`, next to `bend.exe`, or in `%CARGO_HOME%\bin`. If rustc's `lld-link` fails against the VS CRT, use `RUSTFLAGS=-C linker=link.exe` after `vcvars64`.
-* This fork also has `bend run-wgpu` (WebGPU / DX12 / Vulkan / Metal via HVM2). It runs the same `.bend` files as `run-cu`. NVIDIA CUDA (`run-cu`) is still the faster GPU path when `nvcc` is available.
+**Scaling**
 
+- Designed to use thousands of concurrent workers when the program has independent work.
+- Single-core performance is often weaker than a conventional compiled language.
+- Code generation (`gen-c` / `gen-rs` / `gen-cu`) is still early compared to GCC or GHC.
 
+**This fork vs upstream**
 
+- Windows is a first-class target here (MSVC and GNU/MinGW). Upstream Bend/HVM2 historically assumed a Unix + NVIDIA stack.
+- Extra backends on the same `.bend` files: `run-rs` (parallel Rust), `run-wgpu` (WebGPU / DX12 / Vulkan / Metal), `gen-rs` (standalone Rust).
+- NVIDIA CUDA (`run-cu` / `gen-cu`) is still the faster *GPU HVM* path when `nvcc` is available.
+- Handwritten PTX / Vulkan / wgpu kernels in the perf suite are **not** Bend; they are a separate baseline.
+
+**Windows runtime**
+
+- `bend run-rs` always works (parallel Rust interpreter).
+- `bend run-c` needs HVM2’s C runtime: MSVC `cl` + C11 atomics, or MinGW `gcc -std=c11`. The C heap is several GB.
+- Put `hvm.exe` on `PATH`, next to `bend.exe`, or in `%CARGO_HOME%\bin`.
+- If rustc’s `lld-link` fails against the VS CRT: after `vcvars64`, set `RUSTFLAGS=-C linker=link.exe`.
 
 ## Install
 
@@ -37,18 +53,17 @@ Bend is powered by the [HVM2](https://github.com/higherorderco/hvm) runtime.
 # Install Rust if you haven't already.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# For the C version of Bend, use GCC. We recommend a version up to 12.x.
+# For the C runtime, GCC up to 12.x is a safe choice.
 sudo apt install gcc
 ```
-For the CUDA runtime [install the CUDA toolkit for Linux](https://developer.nvidia.com/cuda-downloads?target_os=Linux) version 12.x.
-
+For CUDA, install the [CUDA toolkit for Linux](https://developer.nvidia.com/cuda-downloads?target_os=Linux) 12.x.
 
 #### On Mac
 ```sh
-# Install Rust if you haven't it already.
+# Install Rust if you haven't already.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# For the C version of Bend, use GCC. We recommend a version up to 12.x.
+# For the C runtime, GCC up to 12.x is a safe choice.
 brew install gcc
 ```
 
@@ -70,52 +85,79 @@ set CC=gcc
 
 `--release` / `cargo install` uses `opt-level = 3`, fat LTO, `codegen-units = 1`, and `strip = true`. Windows targets also pass `/OPT:REF /OPT:ICF` (MSVC) or `--gc-sections` (GNU).
 
-
 ### Install Bend
 
-1. Install HVM2 (this fork) by running:
+1. Install HVM2 (this fork):
 ```sh
 cargo install --git https://github.com/Lyamc/HVM2 --locked
 hvm --version
 ```
-2. Install Bend (this fork) by running:
+For WebGPU as well: `cargo install --git https://github.com/Lyamc/HVM2 --locked --features wgpu`.
+
+2. Install Bend (this fork):
 ```sh
 cargo install --git https://github.com/Lyamc/Bend --locked
 bend --version
 ```
 
-On Windows, either add both install dirs to `PATH` or copy `hvm.exe` next to `bend.exe`. `bend` also looks in `%CARGO_HOME%\bin` (default `%USERPROFILE%\.cargo\bin`). Use `bend run-rs` if you have not built HVM's C runtime.
+On Windows, add both install dirs to `PATH` or copy `hvm.exe` next to `bend.exe`. `bend` also looks in `%CARGO_HOME%\bin` (default `%USERPROFILE%\.cargo\bin`). Use `bend run-rs` if the C runtime was not built.
 
 For a GNU build, add `--target x86_64-pc-windows-gnu` to both `cargo install` commands.
 
-### Getting Started
-#### Running Bend Programs
-```sh
-bend run    <file.bend> # uses the C interpreter by default (parallel)
-bend run-rs <file.bend> # uses the Rust interpreter (sequential)
-bend run-c  <file.bend> # uses the C interpreter (parallel)
-bend run-cu <file.bend> # uses the CUDA interpreter (massively parallel)
-bend run-wgpu <file.bend> # uses the WebGPU / wgpu interpreter (same .bend files)
+## Getting Started
 
-# Notes
-# You can also compile Bend to standalone C/CUDA/Rust files using gen-c, gen-cu, and gen-rs for maximum performance.
-# The code generator is still in its early stages and not as mature as compilers like GCC and GHC.
-# You can use the -s flag to have more information on
-  # Reductions
-  # Time the code took to run
-  # Interaction per second (In millions)
+### Running Bend programs
+
+```sh
+# Interpreters (all can use multiple workers; the program decides if work is parallel)
+bend run      <file.bend>   # C interpreter (default; parallel)
+bend run-rs   <file.bend>   # Rust interpreter (parallel)
+bend run-c    <file.bend>   # C interpreter (parallel)
+bend run-cu   <file.bend>   # CUDA interpreter (massively parallel; NVIDIA)
+bend run-wgpu <file.bend>   # WebGPU interpreter (same .bend files)
+
+# Standalone compilers (print C / Rust / CUDA to stdout; then compile and run the result)
+bend gen-c    <file.bend>   # standalone C
+bend gen-rs   <file.bend>   # standalone Rust
+bend gen-cu   <file.bend>   # standalone CUDA (same interpreted CUDA book as run-cu)
+bend gen-hvm  <file.bend>   # HVM book only
 ```
 
-#### Testing Bend Programs
-The example below sums all the numbers in the range from `start` to `target`. It can be written in two different methods: one that is inherently sequential (and thus cannot be parallelized), and another that is easily parallelizable. (We will be using the `-s`flag in most examples, for the sake of visibility)
+`-s` prints reduction count, wall time, and millions of interactions per second.
 
-#### Sequential version:
-First, create a file named `sequential_sum.bend`
+The generators are still early. `gen-c` / `gen-rs` compile the interaction rules; `gen-cu` currently embeds the same interpreted CUDA runtime as `run-cu`.
+
+Example after `gen-c` / `gen-rs` / `gen-cu`:
+
 ```sh
-# Write this command on your terminal
-touch sequential_sum.bend
+# C (needs cl or gcc; several GB of RAM)
+bend gen-c parallel_sum.bend > parallel_sum.c
+cl /O2 /std:c11 /experimental:c11atomics parallel_sum.c /Fe:parallel_sum.exe
+# or: gcc -O2 -std=c11 parallel_sum.c -o parallel_sum
+./parallel_sum
+
+# Rust
+bend gen-rs parallel_sum.bend > parallel_sum.rs
+rustc --edition 2021 -C opt-level=3 -C lto=thin -C codegen-units=1 -C target-cpu=native --crate-name parallel_sum parallel_sum.rs
+./parallel_sum
+
+# CUDA (nvcc on PATH; same runtime as run-cu)
+bend gen-cu parallel_sum.bend > parallel_sum.cu
+nvcc -O3 -std=c++17 parallel_sum.cu -o parallel_sum
+./parallel_sum
 ```
-Then with your text editor, open the file `sequential_sum.bend`, copy the code below and paste in the file.
+
+`HVM_THREADS` (or `hvm run --threads N`) sets live CPU workers, 1–16. The default is `min(8, 2^floor(log2(physical cores)))`.
+
+### Testing Bend programs
+
+The examples below sum every integer from `start` to `target`. One version is inherently sequential (each step needs the last). The other splits the range so independent halves can run at the same time. `-s` is used so reductions and time are visible.
+
+The *runtime* is not sequential vs parallel here — `run-rs`, `run-c`, `run-cu`, and `run-wgpu` all have parallel evaluators. A sequential *algorithm* still runs on one logical chain of work.
+
+#### Sequential version
+
+Create `sequential_sum.bend`:
 
 ```py
 # Defines the function Sum with two parameters: start and target
@@ -126,7 +168,7 @@ def Sum(start, target):
   else:
     # If start is not equal to target, recursively call Sum with
     # start incremented by 1, and add the result to start.
-    return start + Sum(start + 1, target)  
+    return start + Sum(start + 1, target)
 
 def main():
   # This translates to (1 + (2 + (3 + (...... + (999999 + 1000000)))))
@@ -134,32 +176,20 @@ def main():
   return Sum(1, 1_000_000)
 ```
 
-##### Running the file
-You can run it using Rust interpreter (Sequential)
+Run it (the algorithm is sequential on every backend):
+
 ```sh
 bend run-rs sequential_sum.bend -s
-```
-
-Or you can run it using C interpreter (Sequential)
-```sh
-bend run-c sequential_sum.bend -s
-```
-
-If you have a NVIDIA GPU, you can also run in CUDA (Sequential)
-```sh
+bend run-c  sequential_sum.bend -s
 bend run-cu sequential_sum.bend -s
+bend run-wgpu sequential_sum.bend -s
 ```
 
-In this version, the next value to be calculated depends on the previous sum, meaning that it cannot proceed until the current computation is complete. Now, let's look at the easily parallelizable version.
+Each next sum depends on the previous one, so extra workers do not help.
 
+#### Parallelizable version
 
-#### Parallelizable version:
-First close the old file and then proceed to your terminal to create `parallel_sum.bend`
-```sh
-# Write this command on your terminal
-touch parallel_sum.bend
-```
-Then with your text editor, open the file `parallel_sum.bend`, copy the code below and paste in the file.
+Create `parallel_sum.bend`:
 
 ```py
 # Defines the function Sum with two parameters: start and target
@@ -181,30 +211,24 @@ def main():
   return Sum(1, 1_000_000)
 ```
 
-In this example, the (3 + 4) sum does not depend on the (1 + 2), meaning that it can run in parallel because both computations can happen at the same time. 
+`(3 + 4)` does not depend on `(1 + 2)`, so both can run at the same time.
 
-##### Running the file
-You can run it using Rust interpreter (Sequential)
 ```sh
 bend run-rs parallel_sum.bend -s
-```
-
-Or you can run it using C interpreter (Parallel)
-```sh
-bend run-c parallel_sum.bend -s
-```
-
-If you have a NVIDIA GPU, you can also run in CUDA (Massively parallel)
-```sh
+bend run-c  parallel_sum.bend -s
 bend run-cu parallel_sum.bend -s
+bend run-wgpu parallel_sum.bend -s
+
+# Compiled (usually faster on CPU than the interpreters)
+bend gen-c  parallel_sum.bend > parallel_sum.c
+bend gen-rs parallel_sum.bend > parallel_sum.rs
 ```
 
-In Bend, it can be parallelized by just changing the run command. If your code **can** run in parallel it **will** run in parallel.
+If the code **can** run in parallel, a parallel backend **will** run it in parallel. Switching from `run-rs` to `run-c` or `run-cu` does not rewrite the program; it changes the evaluator.
 
+## Performance (this machine)
 
-### Performance (this machine)
-
-Measured on **Windows**, **RTX 3060 (sm_86)**, from `C:\Build\perf_test` (Lyamc/Bend 0.2.38 + Lyamc/HVM2 2.0.22). Hello/fib columns are **wall** (process start + device setup). Sieve/sort columns are HVM **`TIME` / MIPS** (evaluator only). Same `bend/*.bend` sources, no program edits.
+Measured on **Windows**, **RTX 3060 (sm_86)**, from `C:\Build\perf_test` (Lyamc/Bend 0.2.38 + Lyamc/HVM2 2.0.22). Hello/fib columns are **wall** (process start and GPU/device setup). Sieve/sort columns are HVM **`TIME` / MIPS** (evaluator only). Same `bend/*.bend` sources, no program edits.
 
 | Program | What it does | Bend result | Native GPU result |
 |---|---|---|---|
@@ -215,7 +239,7 @@ Measured on **Windows**, **RTX 3060 (sm_86)**, from `C:\Build\perf_test` (Lyamc/
 
 **Sort is not the same problem** on Bend vs the handwritten GPU kernels. Compare Bend backends to each other on sort; compare GPU natives to each other on the 1e6 LCG sort.
 
-#### Bend / HVM2 interpreters and compilers
+### Bend / HVM2 interpreters and compilers
 
 CPU backends default to **8** workers (`min(8, 2^floor(log2(physical)))`). CUDA is 16 384 threads. Hello/fib are wall ms.
 
@@ -233,16 +257,14 @@ Compile time (not in the run columns): `gen-c` ~0.3–0.4 s, `gen-rs` ~1.4–4.4
 
 `run-c` sieve was **8.54 s** in the suite pass (same 775 M ITRS) and **2.12 s** on an immediate `--threads 8` repeat. `run-rs` at `--threads 16` was sieve **1.60 s** / 485 MIPS, sort **5.38 s** / 286 MIPS.
 
-What that says:
-
 - **Fastest Bend sieve** in the suite is **`gen-c` (1.47 s)**, then **`gen-rs` (1.79 s)** and **`run-rs` (2.03 s)**.
 - **Fastest Bend sort** in the suite is **`gen-c` (5.32 s)**, then **`gen-rs` (6.13 s)**, then **`run-cu` / `gen-cu` (~6.9 s)**.
-- **`run-rs` is now in the same band as `run-c`** (the C-style hbag / steal pool landed on the interpreter too).
-- **`run-cu` / `gen-cu` pay ~0.4 s** just to allocate the CUDA net; they still win on the *balanced* bitonic sort vs the interpreted CPU paths, not on the sieve.
+- **`run-rs` is in the same band as `run-c`** (lock-free pool, C-style local hbag).
+- **`run-cu` / `gen-cu` pay ~0.4 s** just to allocate the CUDA net. They win on the *balanced* bitonic sort vs the interpreted CPU paths, not on the sieve.
 - **`gen-cu` is not a faster CUDA evaluator** — it embeds the same interpreted CUDA runtime as `run-cu`.
 - **`run-wgpu`** hello/fib match ITRS; sieve/sort still DNF. Same `.bend` files, no program edits.
 
-#### Other GPU programs in the same suite (not Bend)
+### Other GPU programs in the same suite (not Bend)
 
 These are handwritten kernels for the *native* problems (full Fib 42, 1e6 sieve, 1e6 LCG sort). Times are **wall ms** and are mostly **device init**, not kernel work.
 
@@ -254,20 +276,22 @@ These are handwritten kernels for the *native* problems (full Fib 42, 1e6 sieve,
 
 PTX and Vulkan finish the real 1e6 sieve/sort in well under the process-start tax. wgpu’s ~0.6 s is almost all adapter/device setup. None of these run Bend or HVM.
 
-### Speedup Examples
-The code snippet below implements a [bitonic sorter](https://en.wikipedia.org/wiki/Bitonic_sorter) with *immutable tree rotations*. It's not the type of algorithm you would expect to run fast on GPUs. However, since it uses a divide and conquer approach, which is inherently parallel, Bend will execute it on multiple threads, no thread creation, no explicit lock management.
+## Speedup Examples
 
-#### Bitonic Sorter Benchmark (upstream)
+The snippet below is a [bitonic sorter](https://en.wikipedia.org/wiki/Bitonic_sorter) with *immutable tree rotations*. That is not the usual “GPU-friendly” algorithm, but it is divide-and-conquer, so Bend can run it on many threads without thread APIs or locks.
 
-See [Performance (this machine)](#performance-this-machine) for numbers from this Windows / RTX 3060 suite. Upstream:
+### Bitonic Sorter Benchmark (upstream)
+
+See [Performance (this machine)](#performance-this-machine) for numbers from this Windows / RTX 3060 suite. Upstream (HigherOrderCO) reported:
 
 - `bend run-rs`: CPU, Apple M3 Max: 12.15 seconds
 - `bend run-c`: CPU, Apple M3 Max: 0.96 seconds
 - `bend run-cu`: GPU, NVIDIA RTX 4090: 0.21 seconds
 
- <details>
-  <summary><b>Click here for the Bitonic Sorter code</b></summary>
-   
+Note: those upstream `run-rs` numbers predate the parallel Rust pool in this fork. Here, `run-rs` is a parallel interpreter.
+
+<details>
+<summary><b>Bitonic sorter code</b></summary>
 
 ```py
 # Sorting Network = just rotate trees!
@@ -342,17 +366,16 @@ def sum(d, t):
 # Sorts a big tree
 def main:
   return sum(20, sort(20, 0, gen(20, 0)))
-
 ```
 
 </details>
-  
-if you are interested in some other algorithms, you can check our [examples folder](https://github.com/HigherOrderCO/Bend/tree/main/examples)
 
+More algorithms: [upstream examples](https://github.com/HigherOrderCO/Bend/tree/main/examples).
 
-### Additional Resources
- - To understand the technology behind Bend, check out the HVM2 [paper](https://paper.higherorderco.com/).
- - We are working on an official documentation, meanwhile for a more in depth
-     explanation check [GUIDE.md](https://github.com/HigherOrderCO/Bend/blob/main/GUIDE.md)
- - Read about our features at [FEATURES.md](https://github.com/HigherOrderCO/Bend/blob/main/FEATURES.md)
- - Bend is developed by [HigherOrderCO](https://higherorderco.com/) - join our [Discord](https://discord.higherorderco.com)!
+## Additional Resources
+
+- HVM2 [paper](https://paper.higherorderco.com/) (the runtime behind Bend)
+- Language walkthrough: [GUIDE.md](https://github.com/HigherOrderCO/Bend/blob/main/GUIDE.md) (upstream)
+- Feature list: [FEATURES.md](https://github.com/HigherOrderCO/Bend/blob/main/FEATURES.md) (upstream)
+- Upstream project: [HigherOrderCO](https://higherorderco.com/) / [Discord](https://discord.higherorderco.com)
+- This fork: [Lyamc/Bend](https://github.com/Lyamc/Bend) and [Lyamc/HVM2](https://github.com/Lyamc/HVM2)
