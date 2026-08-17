@@ -1,8 +1,9 @@
 use bend::{
-  check_book, compile_book, default_hvm_path, desugar_book, hvm_temp_file,
+  check_book, compile_book, default_hvm_path, desugar_book,
   diagnostics::{Diagnostics, DiagnosticsConfig, Severity},
   fun::{Book, Name},
   hvm::hvm_book_show_pretty,
+  hvm_temp_file,
   imports::DefaultLoader,
   load_file_to_book, run_book, AdtEncoding, CompileOpts, CompilerTarget, OptLevel, RunOpts,
 };

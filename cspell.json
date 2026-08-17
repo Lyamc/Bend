@@ -57,9 +57,11 @@
     "linearizing",
     "lnil",
     "lpthread",
+    "Lyamc",
     "mant",
     "Milner",
     "miscompilation",
+    "MSVC",
     "mult",
     "namegen",
     "nams",
@@ -93,6 +95,7 @@
     "resugaring",
     "rfold",
     "rsplit",
+    "rustc",
     "rwts",
     "scons",
     "scopeless",
@@ -117,9 +120,12 @@
     "tunr",
     "unbounds",
     "undefer",
+    "vcvars",
     "vectorize",
     "vectorizes",
-    "walkdir"
+    "Vulkan",
+    "walkdir",
+    "wgpu"
   ],
   "files": [
     "**/*.rs",

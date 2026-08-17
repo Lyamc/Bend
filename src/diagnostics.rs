@@ -226,9 +226,7 @@ impl Diagnostics {
       for (file, origin_to_diagnostics) in groups.iter().rev() {
         if !only_unknown_file_diagnostics {
           match &file {
-            Some(name) => {
-              writeln!(f, "\x1b[1mIn \x1b[4m{}\x1b[0m\x1b[1m :\x1b[0m", name.replace('\\', "/"))?
-            }
+            Some(name) => writeln!(f, "\x1b[1mIn \x1b[4m{}\x1b[0m\x1b[1m :\x1b[0m", name.replace('\\', "/"))?,
             None => writeln!(f, "\x1b[1mOther diagnostics:\x1b[0m")?,
           };
         }
