@@ -178,7 +178,7 @@ fn simplify_rule_match(
 /// This is useful to avoid unnecessary pattern matching.
 fn irrefutable_fst_row_rule(args: Vec<Name>, rule: Rule, idx: usize, used: &mut BTreeSet<usize>) -> Term {
   let mut term = rule.body;
-  for (arg, pat) in args.into_iter().zip(rule.pats.into_iter()) {
+  for (arg, pat) in args.into_iter().zip(rule.pats) {
     match pat {
       Pattern::Var(None) => {}
       Pattern::Var(Some(var)) => {

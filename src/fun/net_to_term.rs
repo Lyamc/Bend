@@ -509,6 +509,7 @@ impl Reader<'_> {
   /// (a a)
   /// ```
   ///
+  #[allow(clippy::result_large_err)]
   fn decay_or_get_ports(&mut self, node: NodeId) -> Result<Term, (Term, Term)> {
     let fst_port = self.net.enter_port(Port(node, 1));
     let snd_port = self.net.enter_port(Port(node, 2));
@@ -519,14 +520,14 @@ impl Reader<'_> {
     // This is not valid for all kinds of nodes, only CON/TUP/DUP, due to their interaction rules.
     if matches!(node_kind, NodeKind::Ctr(_)) {
       match (fst_port, snd_port) {
-        (Port(fst_node, 1), Port(snd_node, 2)) if fst_node == snd_node => {
-          if self.net.node(fst_node).kind == *node_kind {
-            self.scope.remove(&fst_node);
+        (Port(fst_node, 1), Port(snd_node, 2))
+          if fst_node == snd_node && self.net.node(fst_node).kind == *node_kind =>
+        {
+          self.scope.remove(&fst_node);
 
-            let port_zero = self.net.enter_port(Port(fst_node, 0));
-            let term = self.read_term(port_zero);
-            return Ok(term);
-          }
+          let port_zero = self.net.enter_port(Port(fst_node, 0));
+          let term = self.read_term(port_zero);
+          return Ok(term);
         }
         _ => {}
       }

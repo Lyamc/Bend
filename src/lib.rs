@@ -299,7 +299,7 @@ fn filter_hvm_output(
     let keep = HVM_OUTPUT_END_MARKER.len().saturating_sub(1);
     if pending.len() > keep {
       let split_at = pending.len() - keep;
-      if let Err(e) = output.write_all(pending[..split_at].as_bytes()) {
+      if let Err(e) = output.write_all(&pending.as_bytes()[..split_at]) {
         eprintln!("Error writing HVM output. {e}");
       }
       pending.replace_range(..split_at, "");
@@ -313,11 +313,7 @@ fn filter_hvm_output(
     output.flush().map_err(|e| format!("Error flushing HVM output. {e}"))?;
     // Remainder of this buffer plus anything still in the pipe.
     let mut result = after.replace('\r', "");
-    loop {
-      let num_read = match stream.read(&mut buf) {
-        Ok(n) => n,
-        Err(_) => break,
-      };
+    while let Ok(num_read) = stream.read(&mut buf) {
       if num_read == 0 {
         break;
       }

@@ -32,7 +32,7 @@ pub struct Ctx<'book> {
 }
 
 impl Ctx<'_> {
-  pub fn new(book: &mut Book, diagnostics_cfg: DiagnosticsConfig) -> Ctx {
+  pub fn new(book: &mut Book, diagnostics_cfg: DiagnosticsConfig) -> Ctx<'_> {
     Ctx { book, info: Diagnostics::new(diagnostics_cfg) }
   }
 }
@@ -825,10 +825,8 @@ impl Term {
           }
         }
       }
-      Term::Open { typ, .. } => {
-        if typ == from {
-          *typ = to.clone();
-        }
+      Term::Open { typ, .. } if typ == from => {
+        *typ = to.clone();
       }
       _ => (),
     }
@@ -841,10 +839,8 @@ impl Term {
         Term::Def { def, nxt: _ } => {
           def.typ.subst_ctr(from, to);
         }
-        Term::With { typ, bod: _ } => {
-          if typ == from {
-            *typ = to.clone();
-          }
+        Term::With { typ, bod: _ } if typ == from => {
+          *typ = to.clone();
         }
         _ => (),
       }
@@ -1126,15 +1122,11 @@ impl Type {
   pub fn subst_ctr(&mut self, from: &Name, to: &Name) {
     maybe_grow(|| {
       match self {
-        Type::Var(nam) => {
-          if nam == from {
-            *nam = to.clone();
-          }
+        Type::Var(nam) if nam == from => {
+          *nam = to.clone();
         }
-        Type::Ctr(nam, _) => {
-          if nam == from {
-            *nam = to.clone();
-          }
+        Type::Ctr(nam, _) if nam == from => {
+          *nam = to.clone();
         }
         _ => (),
       };

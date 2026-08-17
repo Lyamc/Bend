@@ -134,12 +134,12 @@ impl Phase2 {
       // If both children are variables with the same offset, and their parent is a ctr of the same label,
       // then they are eta-reducible and we replace the current node with the first variable.
       match (fst_typ, snd_typ) {
-        (NodeType::Var(off_lft), NodeType::Var(off_rgt)) => {
-          if off_lft == off_rgt && self.nodes[idx] == self.nodes[(idx as isize + off_lft) as usize] {
-            let Tree::Var { nam } = fst.as_mut() else { unreachable!() };
-            *tree = Tree::Var { nam: std::mem::take(nam) };
-            return NodeType::Var(off_lft);
-          }
+        (NodeType::Var(off_lft), NodeType::Var(off_rgt))
+          if off_lft == off_rgt && self.nodes[idx] == self.nodes[(idx as isize + off_lft) as usize] =>
+        {
+          let Tree::Var { nam } = fst.as_mut() else { unreachable!() };
+          *tree = Tree::Var { nam: std::mem::take(nam) };
+          return NodeType::Var(off_lft);
         }
         (NodeType::Era, NodeType::Era) => {
           *tree = Tree::Era;
