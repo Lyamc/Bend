@@ -13,6 +13,8 @@
 #import <AudioToolbox/AudioToolbox.h>
 #elif defined(__linux__)
 #include <alsa/asoundlib.h>
+#elif defined(_WIN32)
+#include <mmsystem.h>
 #endif
 
 typedef struct {
@@ -22,6 +24,10 @@ typedef struct {
   AudioUnit    unit;
 #elif defined(__linux__)
   snd_pcm_t*   unit;
+  pthread_t    pump;
+  _Atomic(u32) done;
+#elif defined(_WIN32)
+  HWAVEOUT     unit;
   pthread_t    pump;
   _Atomic(u32) done;
 #endif
@@ -147,6 +153,67 @@ static void io_ring_free(IoRing* p) {
       pthread_join(p->pump, NULL);
     }
     snd_pcm_close(p->unit);
+  }
+  free(p);
+}
+
+#elif defined(_WIN32)
+
+static void* io_ring_pump(void* ctx) {
+  IoRing* p = ctx;
+  float   out[256 * 2];
+  WAVEHDR hdr = { 0 };
+  hdr.lpData = (LPSTR)out;
+  hdr.dwBufferLength = sizeof out;
+  while (atomic_load_explicit(&p->done, memory_order_relaxed) == 0) {
+    io_ring_pull(p, out, 256);
+    hdr.dwFlags = 0;
+    if (waveOutPrepareHeader(p->unit, &hdr, sizeof hdr) != MMSYSERR_NOERROR) {
+      Sleep(5);
+      continue;
+    }
+    if (waveOutWrite(p->unit, &hdr, sizeof hdr) != MMSYSERR_NOERROR) {
+      waveOutUnprepareHeader(p->unit, &hdr, sizeof hdr);
+      Sleep(5);
+      continue;
+    }
+    while (!(hdr.dwFlags & WHDR_DONE)
+      && atomic_load_explicit(&p->done, memory_order_relaxed) == 0) {
+      Sleep(1);
+    }
+    waveOutUnprepareHeader(p->unit, &hdr, sizeof hdr);
+  }
+  return NULL;
+}
+
+static u32 io_ring_start(IoRing* p, u32 rate) {
+  WAVEFORMATEX fmt = { 0 };
+  fmt.wFormatTag      = WAVE_FORMAT_IEEE_FLOAT;
+  fmt.nChannels       = 2;
+  fmt.nSamplesPerSec  = rate;
+  fmt.wBitsPerSample  = 32;
+  fmt.nBlockAlign     = 8;
+  fmt.nAvgBytesPerSec = rate * 8;
+  if (waveOutOpen(&p->unit, WAVE_MAPPER, &fmt, 0, 0, CALLBACK_NULL)
+      != MMSYSERR_NOERROR) {
+    return ENODEV;
+  }
+  if (pthread_create(&p->pump, NULL, io_ring_pump, p) != 0) {
+    waveOutClose(p->unit);
+    p->unit = NULL;
+    return ENODEV;
+  }
+  return 0;
+}
+
+static void io_ring_free(IoRing* p) {
+  if (p->unit != NULL) {
+    atomic_store_explicit(&p->done, 1, memory_order_relaxed);
+    if (p->pump != 0) {
+      pthread_join(p->pump, NULL);
+    }
+    waveOutReset(p->unit);
+    waveOutClose(p->unit);
   }
   free(p);
 }

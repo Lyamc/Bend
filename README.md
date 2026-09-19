@@ -10,6 +10,12 @@ And with a **fast compiler**, we can run that code at peak compute.
 
 That's Bend - and nothing else.
 
+> **This repository is [Lyamc/Bend](https://github.com/Lyamc/Bend), a Windows-native fork of [bendlang/bend](https://github.com/bendlang/bend).**
+> Bend 2 language and checker stay compatible with upstream 2.0.13. This fork
+> adds a native Windows runtime (MSVC clang, Winsock, Win32 windows, winmm
+> audio, CUDA via `%CUDA_PATH%`). The previous Bend 1 / HVM2 Windows port lives
+> on the `bend1-windows` branch. See [WINDOWS.md](WINDOWS.md).
+
 ## Bend runs FAST
 
 **Target:** be as fast as C on the CPU, as fast as CUDA on the GPU. **Status:**
@@ -111,6 +117,15 @@ With `LAWS.bend`, *"make no mistakes"* becomes enforceable.
 
 ```bash
 curl -fsSL https://bend-lang.com/install.sh | sh
+```
+
+On Windows (this fork), with [Bun](https://bun.sh) on `PATH`:
+
+```powershell
+git clone https://github.com/Lyamc/Bend.git
+cd Bend
+.\install.ps1
+bend demos/io_hello_world/main.bend
 ```
 
 ### 2. Tell your agent to use Bend:
@@ -240,7 +255,7 @@ def add_zero(x):
 - The compiler (not kernel) is 99% AI-written and has not been fully audited yet.
 - The Lean formalization and bend.ts mismatch. Early consistency bugs may occur.
 - A binary needs clang 14+; ! needs 19+, Metal or CUDA 12.
-- No Windows (WSL works); on Linux, Window and Audio need X11 and ALSA headers.
+- This fork runs on native Windows (clang 14+ / LLVM). GPU `!` still needs clang 19+ and CUDA 12+. On Linux, Window and Audio need X11 and ALSA headers.
 - The hub has no names, versions, accounts or search yet. Packages are hashes.
 - Error messages are terse; no debugger, profiler, formatter, REPL or LSP.
 - No editor support, no test framework and no documentation beyond the guide.

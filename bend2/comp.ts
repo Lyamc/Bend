@@ -3,8 +3,11 @@
 // bugs ARE expected. It will take some time for the compiler to be stable.
 
 import * as fs from "node:fs";
+import * as url from "node:url";
 
 import * as Bend from "./bend.ts";
+
+const WINPOSIX = fs.readFileSync(new URL("./winposix.h", import.meta.url), "utf8");
 
 // Comp
 // ====
@@ -3169,6 +3172,9 @@ const TEMPLATE = String.raw`
 #include <metal_stdlib>
 using namespace metal;
 #elif !defined(__CUDACC_RTC__)
+#ifdef _WIN32
+${WINPOSIX}
+#else
 #ifndef __APPLE__
 #define _GNU_SOURCE
 #endif
@@ -3188,6 +3194,7 @@ using namespace metal;
 #include <poll.h>
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
+#endif
 #endif
 #ifdef __OBJC__
 // #include, not #import: bend -o reads an #import as an effect's framework
@@ -3253,8 +3260,10 @@ using namespace metal;
   { __threadfence(); __syncthreads(); }
 #else
 #define DEV
-// only clang 19+ has both, and only it compiles preserve_most soundly
-#if __has_attribute(preserve_none) && __has_attribute(preserve_most)
+// only clang 19+ has both, and only it compiles preserve_most soundly.
+// Windows x64's callee-saved set makes preserve_none crash; keep the
+// default ABI there. musttail still avoids growing the C stack on Unix.
+#if !defined(_WIN32) && __has_attribute(preserve_none) && __has_attribute(preserve_most)
 #define PRESERVE(A) __attribute__((A))
 #else
 #define PRESERVE(A)
@@ -3281,8 +3290,13 @@ using namespace metal;
 #define WL_FN      static PRESERVE(preserve_none) __attribute__((noinline)) Reply
 #define WL_CASE(F) WL_FN WL_##F(WL_SIG)
 #define WL_OPEN    { WL_BANK u32 rn;
+#ifdef _WIN32
+#define WL_JMP(F)  return WL_##F(WL_ALL)
+#define WL_DYN(F)  return wl_tab[F](WL_ALL)
+#else
 #define WL_JMP(F)  __attribute__((musttail)) return WL_##F(WL_ALL)
 #define WL_DYN(F)  __attribute__((musttail)) return wl_tab[F](WL_ALL)
+#endif
 #endif
 #define WL_SPIN     for (;;) { if (err_spun(e.mem, &wpoll)) { return 0; }
 #define WL_SPUN     } break;
@@ -3618,6 +3632,7 @@ static const char* ERR_TEXT[] = { ${ERRS.map((s) => JSON.stringify(s))
 static void err_fail(const char* msg) {
   fflush(stdout);
   fprintf(stderr, "bend: %s\n", msg);
+  fflush(stderr);
   _exit(1);
 }
 
@@ -4277,7 +4292,11 @@ static u32 root_take(Corpus H, THR Term* v) {
 #undef  WL_AGAIN
 #define WL_SPIN
 #define WL_SPUN
+#ifdef _WIN32
+#define WL_AGAIN(F) return WL_##F(WL_ALL)
+#else
 #define WL_AGAIN(F) __attribute__((musttail)) return WL_##F(WL_ALL)
+#endif
 
 typedef Reply (PRESERVE(preserve_none) *WlFn)(WL_SIG);
 #define WL_X(F) WL_FN WL_##F(WL_SIG);
@@ -4566,7 +4585,7 @@ extern "C" __global__ void bend_dev(Corpus H, u32 pass) {
 // pixels itself. An Image is a quadtree over 2^k x 2^k: a Qua at level
 // i splits its square in four (tl, tr, bl, br), a Qua under the pixels
 // follows tl, a Pix is 0xRRGGBB.
-#if defined(__linux__) || defined(__CUDACC_RTC__)
+#if defined(__linux__) || defined(_WIN32) || defined(__CUDACC_RTC__)
 
 INLINE u32 window_pix(Corpus H, Term t, u32 k, u32 x, u32 y) {
   for (u32 i = k; term_tag(t) == TAG_CTR;) {
@@ -4642,7 +4661,11 @@ static void* pool_mmap(u64 bytes) {
 }
 
 static Term* pool_stack(void) {
+#ifdef _WIN32
+  u64   len = 1ull << 23;
+#else
   u64   len = 1ull << 31;
+#endif
   char* p   = pool_mmap(len + 16384 + SIGSTKSZ);
   if (mprotect(p + len, 16384, PROT_NONE) != 0) {
     err_fail("stack guard failed");
@@ -5164,11 +5187,13 @@ OUTLINE Term corpus_eval(Corpus H, Term t) {
 // Io
 // ==
 
+#ifndef _WIN32
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#endif
 
 #define IO_READ 1
 #define IO_TIME 2
@@ -6123,9 +6148,179 @@ function io_errs(message) {
   io_out(2, io_bytes(message + "\n"));
 }
 
+function io_sys_win(ffi) {
+  const T = { i: "i32", u: "u32", U: "u64", I: "i64", p: "ptr" };
+  const spec = (s) => Object.fromEntries(s.split(" ").map((x) => {
+    const [name, args, ret] = x.split(/[:>]/);
+    return [name, { args: [...(args ?? "")].map((a) => T[a] ?? "ptr"),
+      returns: T[ret] ?? "i32" }];
+  }));
+  const ws = ffi.dlopen("ws2_32.dll", spec(
+    "WSAStartup:up>i WSAGetLastError:>i socket:iii>U bind:Upu>i listen:Ui>i"
+    + " connect:Upu>i accept:Upp>U send:UpUi>i recv:UpUi>i sendto:UpUipu>i"
+    + " recvfrom:UpUipp>i closesocket:U>i ioctlsocket:Uup>i"
+    + " setsockopt:Uiipu>i getsockopt:Uiipp>i WSAPoll:pui>i"));
+  const k32 = ffi.dlopen("kernel32.dll", {
+    FormatMessageA: { args: ["u32", "ptr", "u32", "u32", "ptr", "u32", "ptr"],
+      returns: "u32" },
+  });
+  const wsa = new Uint8Array(512);
+  ws.symbols.WSAStartup(0x0202, ffi.ptr(wsa));
+  const tab = [];
+  const dead = (s) => s === undefined || s === 0n || s === -1n
+    || s === 0xFFFFFFFFFFFFFFFFn || Number(s) === -1;
+  const put = (s) => {
+    const v = typeof s === "bigint" ? s : BigInt(s);
+    if (dead(v)) {
+      return -1;
+    }
+    tab.push(v);
+    return tab.length - 1;
+  };
+  const sok = (fd) => tab[fd];
+  const last = { n: 0 };
+  const map_err = (e) => e === 10035 ? 11 : e === 10036 ? 115 : e;
+  const fail = () => {
+    last.n = map_err(ws.symbols.WSAGetLastError());
+    return -1;
+  };
+  const view = (p, n) => new Int32Array(
+    (ffi.toArrayBuffer ?? globalThis.Bun?.FFI?.toArrayBuffer)(p, 0, n));
+  return {
+    mac: false,
+    ptr: ffi.ptr,
+    errno: () => last.n,
+    strerror: (code) => {
+      const buf = new Uint8Array(256);
+      const n = k32.symbols.FormatMessageA(0x1000, null, code, 0, ffi.ptr(buf),
+        255, null);
+      return n > 0 ? io_text(buf, n).trim() : "error " + code;
+    },
+    socket: (d, t, p) => {
+      const fd = put(ws.symbols.socket(d, t, p));
+      return fd < 0 ? fail() : fd;
+    },
+    bind: (fd, a, n) => ws.symbols.bind(sok(fd), a, n) === 0 ? 0 : fail(),
+    listen: (fd, n) => ws.symbols.listen(sok(fd), n) === 0 ? 0 : fail(),
+    connect: (fd, a, n) => {
+      if (ws.symbols.connect(sok(fd), a, n) === 0) {
+        return 0;
+      }
+      const e = ws.symbols.WSAGetLastError();
+      last.n = e === 10035 ? 115 : map_err(e);
+      return -1;
+    },
+    accept: (fd, a, n) => {
+      const got = put(ws.symbols.accept(sok(fd), a, n));
+      if (got < 0) {
+        last.n = map_err(ws.symbols.WSAGetLastError());
+        return -1;
+      }
+      return got;
+    },
+    send: (fd, b, n, f) => {
+      const r = ws.symbols.send(sok(fd), b, n, f);
+      return r < 0 ? fail() : r;
+    },
+    recv: (fd, b, n, f) => {
+      const r = ws.symbols.recv(sok(fd), b, n, f);
+      return r < 0 ? fail() : r;
+    },
+    sendto: (fd, b, n, f, a, al) => {
+      const r = ws.symbols.sendto(sok(fd), b, n, f, a, al);
+      return r < 0 ? fail() : r;
+    },
+    recvfrom: (fd, b, n, f, a, al) => {
+      const r = ws.symbols.recvfrom(sok(fd), b, n, f, a, al);
+      return r < 0 ? fail() : r;
+    },
+    close: (fd) => {
+      const r = ws.symbols.closesocket(sok(fd));
+      tab[fd] = 0n;
+      return r === 0 ? 0 : fail();
+    },
+    pread: (fd, ptr, len, off) => {
+      const fs = require("fs");
+      const mem = new Uint8Array(
+        (ffi.toArrayBuffer ?? globalThis.Bun?.FFI?.toArrayBuffer)(ptr, 0, len));
+      try {
+        return fs.readSync(fd, mem, 0, len, Number(off));
+      } catch (e) {
+        last.n = -(e.errno ?? 5);
+        return -1;
+      }
+    },
+    fcntl: (fd, cmd, arg) => {
+      if (cmd === 3) {
+        return 0;
+      }
+      if (cmd === 4) {
+        const nb = new Uint32Array([(arg & 0x800) ? 1 : 0]);
+        return ws.symbols.ioctlsocket(sok(fd), 0x8004667E, ffi.ptr(nb)) === 0
+          ? 0 : fail();
+      }
+      last.n = 22;
+      return -1;
+    },
+    setsockopt: (fd, level, name, v, n) => {
+      const L = level === 1 ? 0xFFFF : level;
+      const N = name === 2 ? 4 : name;
+      return ws.symbols.setsockopt(sok(fd), L, N, v, n) === 0 ? 0 : fail();
+    },
+    getsockopt: (fd, level, name, v, n) => {
+      const L = level === 1 ? 0xFFFF : level;
+      const N = name === 4 ? 0x1007 : name;
+      if (ws.symbols.getsockopt(sok(fd), L, N, v, n) !== 0) {
+        return fail();
+      }
+      if (name === 4) {
+        const i = view(v, 4);
+        i[0] = map_err(i[0]);
+      }
+      return 0;
+    },
+    poll: (ptr, n, ms) => {
+      if (!n || ptr == null || ptr === 0) {
+        if (ms > 0 && typeof Bun !== "undefined" && Bun.sleepSync) {
+          Bun.sleepSync(ms);
+        }
+        return 0;
+      }
+      const buf = view(ptr, n * 8);
+      const raw = new Uint8Array(n * 16);
+      const wdv = new DataView(raw.buffer);
+      for (let i = 0; i < n; i += 1) {
+        wdv.setBigUint64(i * 16, sok(buf[2 * i]) ?? 0n, true);
+        const ev = buf[2 * i + 1] & 0xFFFF;
+        wdv.setInt16(i * 16 + 8, (ev & 1 ? 0x0300 : 0) | (ev & 4 ? 0x0010 : 0),
+          true);
+      }
+      const r = ws.symbols.WSAPoll(ffi.ptr(raw), n, ms);
+      if (r < 0) {
+        return fail();
+      }
+      for (let i = 0; i < n; i += 1) {
+        const rev = wdv.getInt16(i * 16 + 10, true);
+        let out = 0;
+        if (rev & (0x0300 | 0x0001 | 0x0002)) {
+          out |= 1;
+        }
+        if (rev & 0x0010) {
+          out |= 4;
+        }
+        buf[2 * i + 1] = (out << 16) | (buf[2 * i + 1] & 0xFFFF);
+      }
+      return r;
+    },
+  };
+}
+
 function io_sys() {
   if (globalThis.BEND_SYS === undefined) {
     const ffi = require("bun:ffi");
+    if (process.platform === "win32") {
+      globalThis.BEND_SYS = io_sys_win(ffi);
+    } else {
     const mac = process.platform === "darwin";
     const err = mac ? "__error" : "__errno_location";
     const T = { i: "i32", u: "u32", U: "u64", I: "i64", p: "ptr",
@@ -6149,6 +6344,7 @@ function io_sys() {
       : lib.symbols.fcntl(fd, cmd, arg);
     globalThis.BEND_SYS = { ...lib.symbols, fcntl, ptr: ffi.ptr, mac,
       errno: () => ffi.read.i32(lib.symbols[err](), 0) };
+    }
   }
   return globalThis.BEND_SYS;
 }

@@ -37,6 +37,29 @@ static void window_close(intptr_t at) {
   free(win);
 }
 
+#elif defined(_WIN32)
+
+#ifndef BendWin
+#define BendWin BendWin
+typedef struct {
+  HWND hwnd;
+  u32  w;
+  u32  h;
+  u32* pix;
+  u32  n;
+  u32  cap;
+  u32* evs;
+} BendWin;
+#endif
+
+static void window_close(intptr_t at) {
+  BendWin* win = (BendWin*)at;
+  DestroyWindow(win->hwnd);
+  free(win->pix);
+  free(win->evs);
+  free(win);
+}
+
 #else
 
 static void window_close(intptr_t at) {

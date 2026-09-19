@@ -981,11 +981,15 @@ export function book_adt(book: Book, tm: Extract<HTerm, { $: "ADT" }>, ctx: Ctx,
 
 // BEND_DIR holds base.bend and effs/: this file's directory, or, in the
 // compiled bend (its modules live in Bun's /$bunfs), bend2/ beside bin/
-export const BEND_DIR = import.meta.url.startsWith("file:///$bunfs/")
+function path_fwd(p: string): string {
+  return p.replace(/\\/g, "/");
+}
+
+export const BEND_DIR = path_fwd(import.meta.url.startsWith("file:///$bunfs/")
   ? path.join(path.dirname(fs.realpathSync(process.execPath)), "..", "bend2")
-  : url.fileURLToPath(new URL(".", import.meta.url));
-export const BASE_BEND = fs.realpathSync(path.join(BEND_DIR, "base.bend"));
-const BEND_LIB = path.resolve(process.env.BEND_LIB ?? path.join(os.homedir(), ".bend", "lib"));
+  : url.fileURLToPath(new URL(".", import.meta.url)));
+export const BASE_BEND = path_fwd(fs.realpathSync(path.join(BEND_DIR, "base.bend")));
+const BEND_LIB = path_fwd(path.resolve(process.env.BEND_LIB ?? path.join(os.homedir(), ".bend", "lib")));
 export const BEND_HUB   = process.env.BEND_HUB ?? "https://hub.bend-lang.com";
 
 async function hub_get(book: Book, sub: string, hash: string, spn?: Span): Promise<string> {
@@ -999,6 +1003,7 @@ async function hub_get(book: Book, sub: string, hash: string, spn?: Span): Promi
 }
 
 export async function book_load(book: Book, file: string, ns: string, seen: Map<string, string | null>, spn?: Span): Promise<number> {
+  file = path_fwd(file);
   if (file.startsWith(BEND_LIB + "/") && !fs.existsSync(file)) {
     const pkg = file.slice(BEND_LIB.length + 1).split("/")[0];
     const man = await hub_get(book, pkg + "/manifest", pkg.slice(2), spn);
@@ -1014,7 +1019,7 @@ export async function book_load(book: Book, file: string, ns: string, seen: Map<
   if (!fs.existsSync(file)) {
     throw Err(book, ctx_nil(), "no such file: " + file, undefined, spn);
   }
-  const real = fs.realpathSync(file);
+  const real = path_fwd(fs.realpathSync(file));
   const done = seen.get(real);
   if (done === null) {
     throw Err(book, ctx_nil(), "an import cycle through " + file, undefined, spn);

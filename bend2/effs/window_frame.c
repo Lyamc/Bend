@@ -3,7 +3,7 @@
 
 // An event is five words: kind (0 key, 1 mouse, 2 move, 3 close) and
 // its fields; a frame answers the events pumped since the last one.
-#if defined(__OBJC__) || defined(__linux__)
+#if defined(__OBJC__) || defined(__linux__) || defined(_WIN32)
 
 static Term window_node(Env e, const u32* ev) {
   static const u32 cids[3] = { CID_KEY, CID_MOUSE, CID_MOVE };
@@ -338,6 +338,114 @@ static void window_show(Env e, BendWin* win, Term image) {
   XPutImage(win->dpy, win->win, DefaultGC(win->dpy, DefaultScreen(win->dpy)),
     win->img, 0, 0, 0, 0, w, h);
   XFlush(win->dpy);
+}
+
+static Term window_frame(Env e, intptr_t at, Term image) {
+  BendWin* win = (BendWin*)at;
+  io_sync();
+  window_pump(win);
+  window_show(e, win, image);
+  Term list = window_list(e, win->evs, win->n);
+  win->n = 0;
+  return list;
+}
+
+#elif defined(_WIN32)
+
+#ifndef BendWin
+#define BendWin BendWin
+typedef struct {
+  HWND hwnd;
+  u32  w;
+  u32  h;
+  u32* pix;
+  u32  n;
+  u32  cap;
+  u32* evs;
+} BendWin;
+#endif
+
+static void window_pump(BendWin* win) {
+  MSG msg;
+  while (PeekMessageW(&msg, win->hwnd, 0, 0, PM_REMOVE)) {
+    TranslateMessage(&msg);
+    DispatchMessageW(&msg);
+  }
+}
+
+#if BEND_CUDA
+static CUfunction  window_pso;
+static CUdeviceptr window_buf;
+static u64         window_len;
+#endif
+
+static void window_fill(Env e, u32* pix, u32 w, u32 h, Term image, u32 k) {
+#if BEND_CUDA
+  if (io_gpu) {
+    Corpus H    = e.mem;
+    u64    len  = (u64)w * h * 4;
+    void*  args[] = { &H, &image, &w, &h, &k, &window_buf };
+    if (window_pso == NULL && cuModuleGetFunction(&window_pso, gpu_lib,
+      "window_dev") != CUDA_SUCCESS) {
+      err_fail("cannot load the window kernel");
+    }
+    if (len > window_len) {
+      if (window_buf != 0) {
+        cuMemFree(window_buf);
+      }
+      if (cuMemAlloc(&window_buf, len) != CUDA_SUCCESS) {
+        err_fail("the frame's device buffer failed");
+      }
+      window_len = len;
+    }
+    if (cuLaunchKernel(window_pso, (w + 31) / 32, (h + 7) / 8, 1, 32, 8, 1, 0,
+      NULL, args, NULL) != CUDA_SUCCESS
+      || cuMemcpyDtoH(pix, window_buf, len) != CUDA_SUCCESS) {
+      err_fail("the frame's device fill failed");
+    }
+    return;
+  }
+#endif
+  for (u32 y = 0; y < h; y += 1) {
+    for (u32 x = 0; x < w; x += 1) {
+      pix[y * w + x] = window_pix(e.mem, image, k, x, y);
+    }
+  }
+}
+
+static void window_pace(void) {
+  static u64 due;
+  u64 now = io_tick();
+  if (due > now) {
+    struct timespec ts = { 0, (long)(due - now) };
+    nanosleep(&ts, NULL);
+  }
+  due = (due > now ? due : now) + 16666667;
+}
+
+static void window_show(Env e, BendWin* win, Term image) {
+  u32 w = win->w;
+  u32 h = win->h;
+  u32 k = 0;
+  while ((1u << k) < w || (1u << k) < h) {
+    k += 1;
+  }
+  window_fill(e, win->pix, w, h, image, k);
+  for (u32 i = 0; i < w * h; i += 1) {
+    u32 p = win->pix[i];
+    win->pix[i] = (p & 0xFF00) | ((p & 0xFF) << 16) | ((p >> 16) & 0xFF);
+  }
+  window_pace();
+  BITMAPINFO bi = { 0 };
+  bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bi.bmiHeader.biWidth = (LONG)w;
+  bi.bmiHeader.biHeight = -(LONG)h;
+  bi.bmiHeader.biPlanes = 1;
+  bi.bmiHeader.biBitCount = 32;
+  bi.bmiHeader.biCompression = BI_RGB;
+  HDC dc = GetDC(win->hwnd);
+  SetDIBitsToDevice(dc, 0, 0, w, h, 0, 0, 0, h, win->pix, &bi, DIB_RGB_COLORS);
+  ReleaseDC(win->hwnd, dc);
 }
 
 static Term window_frame(Env e, intptr_t at, Term image) {
