@@ -36,6 +36,33 @@ static void window_set_title(intptr_t at, const char* text, u64 n) {
   XFlush(win->dpy);
 }
 
+#elif defined(_WIN32)
+
+#ifndef BendWin
+#define BendWin BendWin
+typedef struct {
+  HWND hwnd;
+  u32  w;
+  u32  h;
+  u32* pix;
+  u32  n;
+  u32  cap;
+  u32* evs;
+} BendWin;
+#endif
+
+static void window_set_title(intptr_t at, const char* text, u64 n) {
+  BendWin* win = (BendWin*)at;
+  int nw = MultiByteToWideChar(CP_UTF8, 0, text, (int)n, NULL, 0);
+  wchar_t* wt = io_mem(malloc((nw + 1) * sizeof(wchar_t)));
+  if (nw > 0) {
+    MultiByteToWideChar(CP_UTF8, 0, text, (int)n, wt, nw);
+  }
+  wt[nw > 0 ? nw : 0] = 0;
+  SetWindowTextW(win->hwnd, wt);
+  free(wt);
+}
+
 #else
 
 static void window_set_title(intptr_t at, const char* text, u64 n) {

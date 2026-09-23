@@ -314,8 +314,12 @@ async function cli_checkup(file: string): Promise<void> {
   }
 }
 
+function path_fwd(p: string): string {
+  return p.replace(/\\/g, "/");
+}
+
 function path_real(p: string): string {
-  return fs.existsSync(p) ? fs.realpathSync(p) : path.resolve(p);
+  return path_fwd(fs.existsSync(p) ? fs.realpathSync(p) : path.resolve(p));
 }
 
 function cli_emit(book: Bend.Book, out: string): void {
@@ -366,36 +370,44 @@ function cc_find(gpu: boolean): string {
     + " or newer to build " + (gpu ? "a GPU program" : "binaries") + " (found "
     + olds.join(", ") + "); on Debian/Ubuntu: curl -fsSL"
     + " https://apt.llvm.org/llvm.sh | sudo bash -s 19; on macOS: xcode-select"
-    + " --install";
+    + " --install; on Windows: install LLVM from https://llvm.org and put"
+    + " clang on PATH (GPU binaries need clang 19+)";
 }
 
 // cli_build builds the C file at `file` into the binary `bin`. A `!` program
 // builds with the GPU lane and writes its GPU program too (on Linux only with
-// CUDA at $CUDA_HOME, else at /usr/local/cuda, its libraries in lib64 or, as
-// nix lays them, lib; else the ! runs on the cores). On macOS a program with
-// a framework (#import: a window, audio) builds as Objective-C; on Linux it
-// links the X11 and ALSA libraries it includes.
+// CUDA at $CUDA_HOME or $CUDA_PATH, else at /usr/local/cuda, its libraries in
+// lib64, lib, or Windows lib\x64; else the ! runs on the cores). On macOS a
+// program with a framework (#import: a window, audio) builds as Objective-C;
+// on Linux it links the X11 and ALSA libraries it includes; on Windows it
+// links Winsock, GDI and winmm (via pragma comment).
 function cli_build(bin: string, file: string): void {
   const c     = fs.readFileSync(file, "utf8");
   const mac   = process.platform === "darwin";
-  const cuda  = process.env.CUDA_HOME || "/usr/local/cuda";
+  const win   = process.platform === "win32";
+  const cuda  = process.env.CUDA_HOME || process.env.CUDA_PATH
+    || "/usr/local/cuda";
+  const nvrtc = path.join(cuda, "include", "nvrtc.h");
   const bangs = !/^#define BANGS\s+0$/m.test(c)
-    && (mac || fs.existsSync(cuda + "/include/nvrtc.h"));
+    && (mac || fs.existsSync(nvrtc));
   const cc    = cc_find(bangs);
   const objc  = mac && (bangs || /^#import /m.test(c))
     ? ["-x", "objective-c", "-fobjc-arc", "-fmodules"] : [];
-  const libs  = [["X11", "X11"], ["alsa", "asound"]].flatMap(([h, l]) =>
+  const libs  = win ? [] : [["X11", "X11"], ["alsa", "asound"]].flatMap(([h, l]) =>
     !mac && c.includes("#include <" + h + "/") ? ["-l" + l] : []);
-  const cpu = [...objc, "-std=c11", "-O3", file, "-lpthread", "-lm",
-    ...libs, "-o", path.resolve(bin)];
+  const out   = win && !/\.[A-Za-z0-9]+$/.test(bin) ? bin + ".exe" : bin;
+  const cpu = [...objc, "-std=c11", "-O3",
+    file, ...(win ? ["-Wl,/STACK:268435456"] : ["-lpthread", "-lm"]),
+    ...libs, "-o", path.resolve(out)];
   const gpu = mac ? ["-DBEND_METAL=1", ...cpu]
-    : ["-DBEND_CUDA=1", "-I" + cuda + "/include", "-L" + cuda + "/lib64",
-      "-L" + cuda + "/lib", ...cpu, "-lcuda", "-lnvrtc"];
+    : ["-DBEND_CUDA=1", "-I" + path.join(cuda, "include"),
+      "-L" + path.join(cuda, win ? "lib/x64" : "lib64"),
+      "-L" + path.join(cuda, "lib"), ...cpu, "-lcuda", "-lnvrtc"];
   const steps: [string, string[]][] = bangs
-    ? [[cc, gpu], [path.resolve(bin), ["--gpu-build"]]] : [[cc, cpu]];
+    ? [[cc, gpu], [path.resolve(out), ["--gpu-build"]]] : [[cc, cpu]];
   for (const [cmd, args] of steps) {
     if (child.spawnSync(cmd, args, { stdio: "inherit" }).status !== 0) {
-      throw "Error: " + path.basename(cmd) + " failed to build " + bin;
+      throw "Error: " + path.basename(cmd) + " failed to build " + out;
     }
   }
 }
@@ -568,7 +580,10 @@ async function cli_login(): Promise<string> {
   }
   cli_say(2, "log in at " + st.verify_url + "\n");
   try {
-    Bun.spawn([process.platform === "darwin" ? "open" : "xdg-open", st.verify_url], { stdout: "ignore", stderr: "ignore" });
+    Bun.spawn([process.platform === "darwin" ? "open"
+      : process.platform === "win32" ? "cmd" : "xdg-open",
+      ...(process.platform === "win32" ? ["/c", "start", "", st.verify_url]
+        : [st.verify_url])], { stdout: "ignore", stderr: "ignore" });
   } catch {}
   const until = Date.parse(st.expires_at ?? "") || Date.now() + 600000;
   while (Date.now() < until) {
@@ -597,17 +612,17 @@ async function cli_login(): Promise<string> {
 // takes the entry's ancestor directories along, as many as the deepest climb.
 function pkg_files(file: string, book: Bend.Book,
   seen: Map<string, string | null>): Record<string, string> {
-  const dir  = file.slice(0, file.lastIndexOf("/") + 1);
+  const dir  = path_fwd(file).slice(0, path_fwd(file).lastIndexOf("/") + 1);
   const raws = [...[...seen].flatMap(([real, ns]): [string, string][] =>
     real === BASE || ns === null || ns.startsWith("0x") ? []
       : [[ns === "" ? path.basename(file) : ns + ".bend", real]]),
   ...Object.entries(book.tlds).flatMap(([k, tld]): [string, string][] =>
     tld.$ !== "Def" || tld.i === undefined || tld.b === true
       || k.startsWith("0x") ? [] : tld.i.map((f) =>
-      [f.startsWith(dir) ? f.slice(dir.length) : f, f]))];
+      [path_fwd(f).startsWith(dir) ? path_fwd(f).slice(dir.length) : path_fwd(f), f]))];
   const ups = raws.map(([p]) => path.posix.normalize(p).split("/")
     .filter((s) => s === "..").length);
-  const anc = fs.realpathSync(path.dirname(file)).split("/")
+  const anc = path_fwd(fs.realpathSync(path.dirname(file))).split("/")
     .slice(-Math.max(0, ...ups) || Infinity);
   const files: Record<string, string> = {};
   for (const [raw, real] of raws) {
