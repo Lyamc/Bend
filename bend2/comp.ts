@@ -3448,26 +3448,26 @@ ${WINPOSIX}
 
 // A segment: a case of the device's switch; on the host, a preserve_none
 // function (WL_SIG) entered by musttail, its words fresh at WL_OPEN.
+// Windows x64 has no working musttail, so the host uses the same switch
+// loop as the device and does not grow the C stack.
 #if DEVICE
 #define LOCK(l)
 #define UNLOCK(l)
+#else
+#define LOCK(l)    while (__atomic_exchange_n(&(l), 1, __ATOMIC_ACQUIRE)) {}
+#define UNLOCK(l)  __atomic_store_n(&(l), 0, __ATOMIC_RELEASE)
+#endif
+#if DEVICE || defined(_WIN32)
 #define WL_CASE(F) case F:
 #define WL_OPEN    {
 #define WL_JMP(F)  { fid = (F); break; }
 #define WL_DYN     WL_JMP
 #else
-#define LOCK(l)    while (__atomic_exchange_n(&(l), 1, __ATOMIC_ACQUIRE)) {}
-#define UNLOCK(l)  __atomic_store_n(&(l), 0, __ATOMIC_RELEASE)
 #define WL_FN      static PRESERVE(preserve_none) __attribute__((noinline)) Reply
 #define WL_CASE(F) WL_FN WL_##F(WL_SIG)
 #define WL_OPEN    { WL_BANK u32 rn;
-#ifdef _WIN32
-#define WL_JMP(F)  return WL_##F(WL_ALL)
-#define WL_DYN(F)  return wl_tab[F](WL_ALL)
-#else
 #define WL_JMP(F)  __attribute__((musttail)) return WL_##F(WL_ALL)
 #define WL_DYN(F)  __attribute__((musttail)) return wl_tab[F](WL_ALL)
-#endif
 #endif
 #define WL_SPIN     for (;;) { if (err_spun(e.mem, &wpoll)) { return 0; }
 #define WL_SPUN     } break;
@@ -4446,17 +4446,13 @@ ${spins}
 
 // A host self-jump is a tail call: as a loop, clang hoisted constants into
 // symreg's entry (3.05 s against 2.51 s).
-#if !DEVICE
+#if !DEVICE && !defined(_WIN32)
 #undef  WL_SPIN
 #undef  WL_SPUN
 #undef  WL_AGAIN
 #define WL_SPIN
 #define WL_SPUN
-#ifdef _WIN32
-#define WL_AGAIN(F) return WL_##F(WL_ALL)
-#else
 #define WL_AGAIN(F) __attribute__((musttail)) return WL_##F(WL_ALL)
-#endif
 
 typedef Reply (PRESERVE(preserve_none) *WlFn)(WL_SIG);
 #define WL_X(F) WL_FN WL_##F(WL_SIG);
@@ -4471,7 +4467,7 @@ static Reply work_loop(Env e, Stk sp, Term t, u32 seq) {
   WL_BANK
   u32 rn = 0;
   r0 = t;
-#if DEVICE
+#if DEVICE || defined(_WIN32)
   Fid fid   = FID_ENTER;
   u32 wpoll = 0;
   for (;;) {
@@ -4561,7 +4557,7 @@ ${segs}
     return task_deliver(e.mem, cont, idx, rv, n);
   }}
 
-#if DEVICE
+#if DEVICE || defined(_WIN32)
   default: {
     err_post(e.mem, ERR_FIDS);
     return 0;

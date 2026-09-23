@@ -52,13 +52,12 @@ bun bend2/main.ts demos/io_hello_world/main.bend
   pthreads, mmap-on-reserve, poll, sockets, `clock_gettime`).
 - The CPU heap reserves 4 GiB of virtual address space (upstream Linux uses
   8 TiB overcommit) and commits pages on first touch. Worker stacks are 8 MiB.
-- `clang` is invoked with `-std=c11 -O3 -Wl,/STACK:33554432`. Extra libs
+- `clang` is invoked with `-std=c11 -O3 -Wl,/STACK:268435456`. Extra libs
   (`ws2_32`, `user32`, `gdi32`, `winmm`) are pulled in with
   `#pragma comment(lib, ...)`.
 - Clang's `musttail` / `preserve_none` crash on Windows x64, so the host
-  evaluator uses ordinary calls and a 32 MiB C stack. Deep programs can still
-  overflow; GPU `!` is the intended path for huge trees once clang 19 + CUDA
-  are available.
+  evaluator uses the same switch loop as the GPU device path and does not
+  grow the C stack. GPU `!` still needs clang 19+ and CUDA 12+.
 - CUDA includes/libs are taken from `%CUDA_PATH%` / `%CUDA_HOME%`
   (`include`, `lib\x64`), not `/usr/local/cuda`.
 
