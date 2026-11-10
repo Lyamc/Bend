@@ -379,11 +379,64 @@ static inline void window_x_title(Display* dpy, Window w, const char* text,
     (const unsigned char*)text, (int)n);
 }
 
+#elif defined(_WIN32)
+
+// Win32 window: a fixed client area, or a letterboxed fullscreen popup.
+// Events use the same queue as X11 (Key, Text, Press, Move, Look, Scroll,
+// Focus, Leave, Close).
+typedef struct {
+  HWND     hwnd;
+  u32      width;
+  u32      height;
+  u32*     pix;
+  WinQueue q;
+  u64      period;
+  u32      grab;
+  f32      look_x, look_y;
+  wchar_t  lead;
+  bool     full_now;
+  LONG     style;
+  WINDOWPLACEMENT place;
+  int      vx, vy, vw, vh;
+  f32      sx, sy;
+  u32      cw, ch;
+  bool     tracked;
+} BendWin;
+
+static void window_view(BendWin* win) {
+  u32 w = win->width, h = win->height;
+  u32 cw = win->cw ? win->cw : w;
+  u32 ch = win->ch ? win->ch : h;
+  if (!win->full_now) {
+    win->vx = win->vy = 0;
+    win->vw = (int)w;
+    win->vh = (int)h;
+    win->sx = win->sy = 1;
+    return;
+  }
+  u32 vw = cw, vh = ch;
+  if ((u64)cw * h <= (u64)ch * w) {
+    vw = cw;
+    vh = w ? (u32)((u64)h * vw / w) : 1;
+  } else {
+    vh = ch;
+    vw = h ? (u32)((u64)w * vh / h) : 1;
+  }
+  if (vw == 0) vw = 1;
+  if (vh == 0) vh = 1;
+  win->vw = (int)vw;
+  win->vh = (int)vh;
+  win->vx = (int)(cw - vw) / 2;
+  win->vy = (int)(ch - vh) / 2;
+  win->sx = (f32)w / (f32)vw;
+  win->sy = (f32)h / (f32)vh;
+}
+
 #endif
 
 #ifdef CID(Window.open)
 
-#if defined(__OBJC__) || defined(__linux__)
+#if defined(__OBJC__) || defined(__linux__) || defined(_WIN32)
 
 // Typed text, from *at on, as the next Text event: up to 16 bytes of
 // UTF-8 in its four words, cut between characters, so a long input
@@ -1193,6 +1246,245 @@ static u32 window_make(const char* title, u32 w, u32 h, intptr_t* out,
   return 0;
 }
 
+#elif defined(_WIN32)
+
+static u32 window_vk(WPARAM vk) {
+  switch (vk) {
+    case VK_ESCAPE: return 27;
+    case VK_RETURN: return 13;
+    case VK_TAB:    return 9;
+    case VK_BACK:   return 127;
+    case VK_UP:     return 63232;
+    case VK_DOWN:   return 63233;
+    case VK_LEFT:   return 63234;
+    case VK_RIGHT:  return 63235;
+    case VK_INSERT: return 63271;
+    case VK_DELETE: return 63272;
+    case VK_HOME:   return 63273;
+    case VK_END:    return 63275;
+    case VK_PRIOR:  return 63276;
+    case VK_NEXT:   return 63277;
+    case VK_F1: case VK_F2: case VK_F3: case VK_F4: case VK_F5: case VK_F6:
+    case VK_F7: case VK_F8: case VK_F9: case VK_F10: case VK_F11: case VK_F12:
+      return 63236 + (u32)(vk - VK_F1);
+    case VK_SHIFT:   return 65592;
+    case VK_CONTROL: return 65595;
+    case VK_MENU:    return 65594;
+    case VK_CAPITAL: return 65593;
+    case VK_LWIN:    return 65591;
+    case VK_RWIN:    return 65590;
+    default: break;
+  }
+  if (vk >= 'A' && vk <= 'Z') {
+    return (u32)(vk - 'A' + 'a');
+  }
+  if (vk >= '0' && vk <= '9') {
+    return (u32)vk;
+  }
+  return 65536 + (u32)vk;
+}
+
+static void window_text_at(BendWin* win, const char* s, u64 n) {
+  u64 at = 0;
+  u32 ev[WIN_EV];
+  while (window_chunk(s, n, &at, ev)) {
+    window_put(&win->q, ev);
+  }
+}
+
+static void window_char(BendWin* win, wchar_t ch) {
+  wchar_t pair[2];
+  int n = 1;
+  if (ch >= 0xD800 && ch <= 0xDBFF) {
+    win->lead = ch;
+    return;
+  }
+  if (ch >= 0xDC00 && ch <= 0xDFFF && win->lead != 0) {
+    pair[0] = win->lead;
+    pair[1] = ch;
+    n = 2;
+    win->lead = 0;
+  } else {
+    win->lead = 0;
+    if (ch < 0x20 || ch == 0x7F) {
+      return;
+    }
+    pair[0] = ch;
+  }
+  char utf[8];
+  int k = WideCharToMultiByte(CP_UTF8, 0, pair, n, utf, sizeof utf, NULL, NULL);
+  if (k > 0) {
+    window_text_at(win, utf, (u64)k);
+  }
+}
+
+static void window_click(BendWin* win, int x, int y, u32 b, bool down) {
+  f32 ix = ((f32)x - (f32)win->vx) * win->sx;
+  f32 iy = ((f32)y - (f32)win->vy) * win->sy;
+  window_point(&win->q, CID(Press), 0, (WinTool){ WIN_MOUSE }, ix, iy,
+    GetTickCount(), b, down);
+}
+
+static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+  BendWin* win = (BendWin*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+  if (win == NULL) {
+    return DefWindowProcW(hwnd, msg, wp, lp);
+  }
+  switch (msg) {
+    case WM_CLOSE:
+      window_push(&win->q, CID(Close), 0, 0, 0, 0);
+      return 0;
+    case WM_SETFOCUS:
+      window_focus(&win->q, true);
+      return 0;
+    case WM_KILLFOCUS:
+      if (win->grab) {
+        ClipCursor(NULL);
+        ShowCursor(TRUE);
+        win->grab = 0;
+      }
+      window_focus(&win->q, false);
+      return 0;
+    case WM_CHAR:
+      window_char(win, (wchar_t)wp);
+      return 0;
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN:
+      window_push(&win->q, CID(Key), window_vk(wp), 1, 0, 0);
+      return 0;
+    case WM_KEYUP:
+    case WM_SYSKEYUP:
+      window_push(&win->q, CID(Key), window_vk(wp), 0, 0, 0);
+      return 0;
+    case WM_LBUTTONDOWN: case WM_RBUTTONDOWN: case WM_MBUTTONDOWN:
+    case WM_LBUTTONUP:   case WM_RBUTTONUP:   case WM_MBUTTONUP: {
+      u32 b = msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP ? 0
+        : msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP ? 2 : 1;
+      bool down = msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN
+        || msg == WM_MBUTTONDOWN;
+      window_click(win, (short)LOWORD(lp), (short)HIWORD(lp), b, down);
+      return 0;
+    }
+    case WM_MOUSEMOVE: {
+      if (!win->tracked) {
+        TRACKMOUSEEVENT te = { sizeof te, TME_LEAVE, hwnd, 0 };
+        TrackMouseEvent(&te);
+        win->tracked = true;
+      }
+      int x = (short)LOWORD(lp);
+      int y = (short)HIWORD(lp);
+      if (win->grab) {
+        int cx = (int)win->cw / 2;
+        int cy = (int)win->ch / 2;
+        win->look_x += (f32)(x - cx) * win->sx;
+        win->look_y += (f32)(y - cy) * win->sy;
+        if (x != cx || y != cy) {
+          POINT p = { cx, cy };
+          ClientToScreen(hwnd, &p);
+          SetCursorPos(p.x, p.y);
+        }
+        return 0;
+      }
+      f32 ix = ((f32)x - (f32)win->vx) * win->sx;
+      f32 iy = ((f32)y - (f32)win->vy) * win->sy;
+      if (ix < 0 || iy < 0 || ix >= (f32)win->width || iy >= (f32)win->height) {
+        if (win->q.down[0] == 0) {
+          window_push(&win->q, CID(Leave), 0, 0, 0, 0);
+        }
+        return 0;
+      }
+      window_point(&win->q, CID(Move), 0, (WinTool){ WIN_MOUSE }, ix, iy,
+        GetTickCount(), 0, false);
+      return 0;
+    }
+    case WM_MOUSELEAVE:
+      win->tracked = false;
+      if (!win->grab && win->q.down[0] == 0) {
+        window_push(&win->q, CID(Leave), 0, 0, 0, 0);
+      }
+      return 0;
+    case WM_MOUSEWHEEL: {
+      POINT pt = { (short)LOWORD(lp), (short)HIWORD(lp) };
+      ScreenToClient(hwnd, &pt);
+      f32 ix = ((f32)pt.x - (f32)win->vx) * win->sx;
+      f32 iy = ((f32)pt.y - (f32)win->vy) * win->sy;
+      f32 s = (f32)GET_WHEEL_DELTA_WPARAM(wp) / 120.f;
+      window_push(&win->q, CID(Scroll), f32_rewrap(ix), f32_rewrap(iy),
+        f32_rewrap(0), f32_rewrap(s));
+      return 0;
+    }
+    case WM_SIZE:
+      win->cw = LOWORD(lp);
+      win->ch = HIWORD(lp);
+      window_view(win);
+      return 0;
+    case WM_PAINT: {
+      PAINTSTRUCT ps;
+      BeginPaint(hwnd, &ps);
+      EndPaint(hwnd, &ps);
+      return 0;
+    }
+    default:
+      return DefWindowProcW(hwnd, msg, wp, lp);
+  }
+}
+
+static u32 window_make(const char* title, u32 w, u32 h, intptr_t* out,
+  const char** why) {
+  if (w < 1 || h < 1 || w > 16384 || h > 16384) {
+    return EINVAL;
+  }
+  static ATOM cls;
+  if (cls == 0) {
+    WNDCLASSW wc = { 0 };
+    wc.lpfnWndProc = window_proc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    // IDC_ARROW is 32512. The unsuffixed macro follows UNICODE and is
+    // the wrong width for LoadCursorW when UNICODE is unset (MinGW).
+    wc.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512));
+    wc.lpszClassName = L"BendWin";
+    cls = RegisterClassW(&wc);
+    if (cls == 0) {
+      *why = "Window.open: RegisterClass failed";
+      return ENOTSUP;
+    }
+  }
+  RECT r = { 0, 0, (LONG)w, (LONG)h };
+  AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX,
+    FALSE);
+  int nw = MultiByteToWideChar(CP_UTF8, 0, title, -1, NULL, 0);
+  wchar_t* wt = io_mem(malloc((size_t)(nw > 0 ? nw : 1) * sizeof(wchar_t)));
+  if (nw > 0) {
+    MultiByteToWideChar(CP_UTF8, 0, title, -1, wt, nw);
+  } else {
+    wt[0] = 0;
+  }
+  HWND hwnd = CreateWindowExW(0, L"BendWin", wt,
+    WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE,
+    CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top,
+    NULL, NULL, GetModuleHandleW(NULL), NULL);
+  free(wt);
+  if (hwnd == NULL) {
+    *why = "Window.open: no display (build a native binary with bend <file> -o <out> and run it from a desktop session)";
+    return ENOTSUP;
+  }
+  BendWin* win = io_mem(calloc(1, sizeof *win));
+  win->hwnd = hwnd;
+  win->width = w;
+  win->height = h;
+  win->cw = w;
+  win->ch = h;
+  win->pix = io_mem(calloc((size_t)w * h, 4));
+  win->period = 16666667;
+  win->style = GetWindowLongW(hwnd, GWL_STYLE);
+  window_view(win);
+  SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)win);
+  ShowWindow(hwnd, SW_SHOW);
+  UpdateWindow(hwnd);
+  *out = (intptr_t)win;
+  return 0;
+}
+
 #else
 
 static u32 window_make(const char* title, u32 w, u32 h, intptr_t* out,
@@ -1227,7 +1519,7 @@ static void __attribute__((constructor)) window_open_use(void) {
 
 // A frame answers the events pumped since the last one; a constructor of
 // one word packs it in its term, as the compiler builds it.
-#if defined(__OBJC__) || defined(__linux__)
+#if defined(__OBJC__) || defined(__linux__) || defined(_WIN32)
 
 static Term window_node(Env e, const u32* ev) {
   if (ev[0] == CID(Text)) {
@@ -1951,6 +2243,125 @@ static Term window_frame(Env e, intptr_t at, Term image) {
   return window_list(e, &win->q);
 }
 
+#elif defined(_WIN32)
+
+static void window_pump(BendWin* win) {
+  MSG msg;
+  win->look_x = 0;
+  win->look_y = 0;
+  while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
+    TranslateMessage(&msg);
+    DispatchMessageW(&msg);
+  }
+  if (win->grab && (win->look_x != 0 || win->look_y != 0)) {
+    window_push(&win->q, CID(Look), f32_rewrap(win->look_x), f32_rewrap(win->look_y),
+      0, 0);
+  }
+}
+
+#if BEND_CUDA
+static CUfunction  window_pso_win;
+static CUdeviceptr window_buf_win;
+static u64         window_len_win;
+#endif
+
+static void window_sq(u64* H, u32* pix, u32 w, u32 h, Term tm, u32 s, u32 x,
+  u32 y) {
+  if (x >= w || y >= h) {
+    return;
+  }
+  if (s > 1 && term_tag(tm) == TAG_CTR) {
+    u64 l = term_peek(H, tm);
+    s /= 2;
+    for (u32 j = 0; j < 4; j += 1) {
+      window_sq(H, pix, w, h, H[l + j], s, x + j % 2 * s, y + j / 2 * s);
+    }
+    return;
+  }
+  u32 c = window_pix(H, tm, 0, 0, 0);
+  for (u32 i = y; i < h && i < y + s; i += 1) {
+    for (u32 j = x; j < w && j < x + s; j += 1) {
+      pix[i * w + j] = c;
+    }
+  }
+}
+
+static void window_fill(Env e, u32* pix, u32 w, u32 h, Term image, u32 k) {
+#if BEND_CUDA
+  if (io_gpu) {
+    u64*   H    = e.mem;
+    u64    len  = (u64)w * h * 4;
+    void*  args[] = { &H, &image, &w, &h, &k, &window_buf_win };
+    if (window_pso_win == NULL && cuModuleGetFunction(&window_pso_win, gpu_lib,
+      "window_dev") != CUDA_SUCCESS) {
+      err_fail("cannot load the window kernel");
+    }
+    if (len > window_len_win) {
+      if (window_buf_win != 0) {
+        cuMemFree(window_buf_win);
+      }
+      if (cuMemAlloc(&window_buf_win, len) != CUDA_SUCCESS) {
+        err_fail("the frame's device buffer failed");
+      }
+      window_len_win = len;
+    }
+    if (cuLaunchKernel(window_pso_win, (w + 31) / 32, (h + 7) / 8, 1, 32, 8, 1,
+      0, NULL, args, NULL) != CUDA_SUCCESS
+      || cuMemcpyDtoH(pix, window_buf_win, len) != CUDA_SUCCESS) {
+      err_fail("the frame's device fill failed");
+    }
+    return;
+  }
+#endif
+  window_sq(e.mem, pix, w, h, image, 1u << k, 0, 0);
+}
+
+static void window_pace(u64 period) {
+  static u64 due;
+  u64 now = io_tick();
+  if (due > now) {
+    struct timespec ts = { 0, (long)(due - now) };
+    nanosleep(&ts, NULL);
+  }
+  due = (due > now ? due : now) + period;
+}
+
+static void window_show(Env e, BendWin* win, Term image) {
+  u32 w = win->width;
+  u32 h = win->height;
+  u32 k = cls_fit(w > h ? w : h);
+  window_fill(e, win->pix, w, h, image, k);
+  for (u32 i = 0; i < w * h; i += 1) {
+    u32 c = win->pix[i];
+    win->pix[i] = (c & 0xFF00) | ((c & 0xFF) << 16) | ((c >> 16) & 0xFF);
+  }
+  window_pace(win->period);
+  BITMAPINFO bi = { 0 };
+  bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bi.bmiHeader.biWidth = (LONG)w;
+  bi.bmiHeader.biHeight = -(LONG)h;
+  bi.bmiHeader.biPlanes = 1;
+  bi.bmiHeader.biBitCount = 32;
+  bi.bmiHeader.biCompression = BI_RGB;
+  HDC dc = GetDC(win->hwnd);
+  if (win->full_now) {
+    RECT rc;
+    GetClientRect(win->hwnd, &rc);
+    FillRect(dc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
+  }
+  StretchDIBits(dc, win->vx, win->vy, win->vw, win->vh, 0, 0, (int)w, (int)h,
+    win->pix, &bi, DIB_RGB_COLORS, SRCCOPY);
+  ReleaseDC(win->hwnd, dc);
+}
+
+static Term window_frame(Env e, intptr_t at, Term image) {
+  BendWin* win = (BendWin*)at;
+  io_sync();
+  window_pump(win);
+  window_show(e, win, image);
+  return window_list(e, &win->q);
+}
+
 #else
 
 static Term window_frame(Env e, intptr_t at, Term image) {
@@ -1986,6 +2397,20 @@ static void window_set_title(intptr_t at, const char* text, u64 n) {
   BendWin* win = (BendWin*)at;
   window_x_title(win->dpy, win->win, text, n);
   XFlush(win->dpy);
+}
+
+#elif defined(_WIN32)
+
+static void window_set_title(intptr_t at, const char* text, u64 n) {
+  BendWin* win = (BendWin*)at;
+  int nw = MultiByteToWideChar(CP_UTF8, 0, text, (int)n, NULL, 0);
+  wchar_t* wt = io_mem(malloc((size_t)((nw > 0 ? nw : 0) + 1) * sizeof(wchar_t)));
+  if (nw > 0) {
+    MultiByteToWideChar(CP_UTF8, 0, text, (int)n, wt, nw);
+  }
+  wt[nw > 0 ? nw : 0] = 0;
+  SetWindowTextW(win->hwnd, wt);
+  free(wt);
 }
 
 #else
@@ -2050,6 +2475,45 @@ static u32 window_fullscreen(intptr_t at, bool on, const char** why) {
   return 0;
 }
 
+#elif defined(_WIN32)
+
+static u32 window_fullscreen(intptr_t at, bool on, const char** why) {
+  BendWin* win = (BendWin*)at;
+  if (!IsWindow(win->hwnd) || !IsWindowVisible(win->hwnd)) {
+    *why = "Window.fullscreen: window is not on screen";
+    return EAGAIN;
+  }
+  if (win->full_now == on) {
+    return 0;
+  }
+  if (on) {
+    win->place.length = sizeof win->place;
+    GetWindowPlacement(win->hwnd, &win->place);
+    win->style = GetWindowLongW(win->hwnd, GWL_STYLE);
+    HMONITOR mon = MonitorFromWindow(win->hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi = { sizeof mi };
+    if (!GetMonitorInfoW(mon, &mi)) {
+      *why = "Window.fullscreen: no monitor";
+      return ENOTSUP;
+    }
+    SetWindowLongW(win->hwnd, GWL_STYLE,
+      (win->style & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
+    SetWindowPos(win->hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+      mi.rcMonitor.right - mi.rcMonitor.left,
+      mi.rcMonitor.bottom - mi.rcMonitor.top,
+      SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+    win->full_now = true;
+  } else {
+    SetWindowLongW(win->hwnd, GWL_STYLE, win->style);
+    SetWindowPlacement(win->hwnd, &win->place);
+    SetWindowPos(win->hwnd, NULL, 0, 0, 0, 0,
+      SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+    win->full_now = false;
+  }
+  window_view(win);
+  return 0;
+}
+
 #else
 
 static u32 window_fullscreen(intptr_t at, bool on, const char** why) {
@@ -2111,6 +2575,31 @@ static void window_grab(intptr_t at, bool on) {
     win->grab = 0;
   }
   XFlush(win->dpy);
+}
+
+#elif defined(_WIN32)
+
+static void window_grab(intptr_t at, bool on) {
+  BendWin* win = (BendWin*)at;
+  if (on && !win->grab) {
+    RECT r;
+    GetClientRect(win->hwnd, &r);
+    POINT a = { r.left, r.top };
+    POINT b = { r.right, r.bottom };
+    ClientToScreen(win->hwnd, &a);
+    ClientToScreen(win->hwnd, &b);
+    RECT clip = { a.x, a.y, b.x, b.y };
+    ClipCursor(&clip);
+    ShowCursor(FALSE);
+    POINT c = { (LONG)win->cw / 2, (LONG)win->ch / 2 };
+    ClientToScreen(win->hwnd, &c);
+    SetCursorPos(c.x, c.y);
+    win->grab = 1;
+  } else if (!on && win->grab) {
+    ClipCursor(NULL);
+    ShowCursor(TRUE);
+    win->grab = 0;
+  }
 }
 
 #else
@@ -2178,6 +2667,20 @@ static void window_close(intptr_t at) {
   }
 #endif
   XCloseDisplay(win->dpy);
+  free(win->q.evs);
+  free(win);
+}
+
+#elif defined(_WIN32)
+
+static void window_close(intptr_t at) {
+  BendWin* win = (BendWin*)at;
+  if (win->grab) {
+    ClipCursor(NULL);
+    ShowCursor(TRUE);
+  }
+  DestroyWindow(win->hwnd);
+  free(win->pix);
   free(win->q.evs);
   free(win);
 }

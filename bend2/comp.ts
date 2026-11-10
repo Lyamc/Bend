@@ -11,6 +11,9 @@ import * as fs from "node:fs";
 
 import * as Bend from "./bend.ts";
 
+const WINPOSIX = fs.readFileSync(new URL("./effs/winposix.c", import.meta.url), "utf8");
+const WINJS = fs.readFileSync(new URL("./effs/io_sys_win.js", import.meta.url), "utf8");
+
 // Types
 // =====
 
@@ -3151,9 +3154,6 @@ const runtime_c = (tabs: string, spins: string, segs: string,
 // Imports
 // =======
 
-// The Objective-C headers take #include: a build (-o) reads an
-// #import as the framework of an effect.
-
 #pragma clang fp contract(off)
 
 #ifdef __CUDACC_RTC__
@@ -3164,6 +3164,9 @@ const runtime_c = (tabs: string, spins: string, segs: string,
 #include <metal_stdlib>
 using namespace metal;
 #elif !BEND_RTC
+#ifdef _WIN32
+${WINPOSIX}
+#else
 #ifdef __APPLE__
 #define _DARWIN_UNLIMITED_SELECT
 #else
@@ -3188,24 +3191,21 @@ using namespace metal;
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif
+#endif
 #ifdef __OBJC__
 #include <Metal/Metal.h>
 #include <Foundation/Foundation.h>
 #elif BEND_CUDA
 #include <cuda.h>
 #include <nvrtc.h>
+#ifndef _WIN32
 #include <sys/stat.h>
+#endif
 #endif
 #endif
 
 // Dialect
 // =======
-
-// Metal needs coherent(device) (MSL 3.2), or M1-class parts lose stores
-// across threadgroups; CUDA lanes hand off through a32 and FENCE. The
-// preserve_* attributes need clang 19+ and an optimized build. A segment is
-// a case of the device's switch, or a host preserve_none function entered
-// by musttail.
 
 #ifdef __METAL_VERSION__
 #if __METAL_VERSION__ >= 320
@@ -3238,7 +3238,7 @@ using namespace metal;
 #define BAR()   __syncthreads()
 #define BARD()  { __threadfence(); __syncthreads(); }
 #else
-#if __has_attribute(preserve_none) && __has_attribute(preserve_most) \
+#if !defined(_WIN32) && __has_attribute(preserve_none) && __has_attribute(preserve_most) \
   && __OPTIMIZE__
 #define PRESERVE(A) __attribute__((A))
 #else
@@ -3253,20 +3253,21 @@ using namespace metal;
 #endif
 #define FAR static __attribute__((noinline))
 
-// The device inlines a spin once per caller, so a long one is a call there.
-// The host lets clang decide, but for a long F32 loop (emit_native).
 #if DEVICE
 #define DFAR       FAR
 #define LOCK(l)
 #define UNLOCK(l)
+#else
+#define DFAR       INLINE
+#define LOCK(l)    while (__atomic_exchange_n(&(l), 1, __ATOMIC_ACQUIRE)) {}
+#define UNLOCK(l)  __atomic_store_n(&(l), 0, __ATOMIC_RELEASE)
+#endif
+#if DEVICE || defined(_WIN32)
 #define WL_CASE(F) case F: {
 #define WL_OPEN    {
 #define WL_JMP(F)  { fid = (F); break; }
 #define WL_DYN     WL_JMP
 #else
-#define DFAR       INLINE
-#define LOCK(l)    while (__atomic_exchange_n(&(l), 1, __ATOMIC_ACQUIRE)) {}
-#define UNLOCK(l)  __atomic_store_n(&(l), 0, __ATOMIC_RELEASE)
 #define WL_FN      FAR PRESERVE(preserve_none) Term
 #define WL_CASE(F) WL_FN WL_##F(WL_SIG) {
 #define WL_OPEN    { WL_BANK u32 rn;
@@ -4325,8 +4326,7 @@ ${spins}
 // Work
 // ====
 
-// A host self-jump is a tail call: as a loop, clang hoists constants badly.
-#if !DEVICE
+#if !DEVICE && !defined(_WIN32)
 #undef  WL_SPIN
 #undef  WL_SPUN
 #undef  WL_AGAIN
@@ -4348,7 +4348,7 @@ static Term work_loop(Env e, DEV Term* sp, Term t, u32 seq) {
   WL_BANK
   u32 rn = 0;
   r0 = t;
-#if DEVICE
+#if DEVICE || defined(_WIN32)
   u32 fid   = FID_ENTER;
   WL_SPIN
   switch (fid) {
@@ -4431,7 +4431,7 @@ ${segs}
     return task_deliver(e.mem, cont, idx, rv, n);
   }}
 
-#if DEVICE
+#if DEVICE || defined(_WIN32)
   default: {
     err_post(e.mem, ERR_FIDS);
     return 0;
@@ -4617,9 +4617,7 @@ extern "C" __global__ void bend_dev(DEV u64* H, u32 pass, u32 at) {
 // Window
 // ======
 
-// Linux's window fill (the Mac's is window_msl): an Image is a quadtree over
-// 2^k x 2^k (Qua splits tl, tr, bl, br; Pix is 0xRRGGBB).
-#if __linux__ || BEND_RTC
+#if defined(__linux__) || defined(_WIN32) || BEND_RTC
 
 INLINE u32 window_pix(DEV u64* H, Term t, u32 k, u32 x, u32 y) {
   for (u32 i = k; term_tag(t) == TAG_CTR;) {
@@ -4705,7 +4703,11 @@ static void* pool_mmap(u64 bytes) {
 }
 
 static Term* pool_stack(void) {
+#ifdef _WIN32
+  u64   len = 1ull << 23;
+#else
   u64   len = 1ull << 31;
+#endif
   u64   alt = 4 * SIGSTKSZ;
   char* p   = pool_mmap(len + 16384 + alt);
   if (mprotect(p + len, 16384, PROT_NONE)) {
@@ -5349,10 +5351,12 @@ OUTLINE Term corpus_eval(u64* H, Term t) {
 // (octal to some libcs). macOS poll misses FIFO EOF, so io_wait selects,
 // sized to the highest fd.
 
+#ifndef _WIN32
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#endif
 
 #define IO_PARK TERM_HOLE
 
@@ -6235,9 +6239,15 @@ function io_errs(message) {
   io_out(2, io_bytes(message + "\n"));
 }
 
+${WINJS}
+
 function io_sys() {
   if (globalThis.BEND_SYS === undefined) {
     const ffi = require("bun:ffi");
+    if (process.platform === "win32") {
+      globalThis.BEND_SYS = io_sys_win(ffi);
+      return globalThis.BEND_SYS;
+    }
     const mac = process.platform === "darwin";
     const err = mac ? "__error" : "__errno_location";
     const sel = mac ? "select$DARWIN_EXTSN" : "select";

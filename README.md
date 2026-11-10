@@ -113,7 +113,16 @@ With `LAWS.bend`, *"make no mistakes"* becomes enforceable.
 curl -fsSL https://bend-lang.com/install.sh | sh
 ```
 
-This `bend` ignores a project's `bunfig.toml` and `.env`; `bun bend2/main.ts`
+On native Windows, with [Bun](https://bun.sh) on `PATH`:
+
+```powershell
+git clone https://github.com/Lyamc/Bend.git
+cd Bend
+.\install.ps1
+bend demos/io_hello_world/main.bend
+```
+
+See [WINDOWS.md](WINDOWS.md). This `bend` ignores a project's `bunfig.toml` and `.env`; `bun bend2/main.ts`
 from a checkout reads them, so check untrusted code with `bend`.
 
 ### 2. Tell your agent to use Bend:
@@ -249,7 +258,7 @@ def add_zero(x):
 - Laws are proven about Bend's semantics. The backends can still differ, for example in F32 NaN. See WONTFIX.
 - `--verdict` checks the translated terms, the parser and translation into the kernel are not proven.
 - A binary needs clang 14+; ! needs 19+, Metal or CUDA 12.
-- No Windows (WSL works); on Linux, Window and Audio need X11 and ALSA headers.
+- This fork runs on native Windows (clang 14+ / LLVM; see WINDOWS.md). GPU `!` still needs clang 19+ and CUDA 12+. On Linux, Window and Audio need X11 and ALSA headers.
 - A hub package is a hash, unless its author names and versions it after `bend login`.
 - Error messages are terse; no debugger, profiler or REPL.
 - The editor tool only formats; the community bend2-lsp adds errors and hover.

@@ -907,11 +907,15 @@ export function book_adt(book: Book, tm: Extract<HTerm, { $: "ADT" }>, ctx: Ctx,
   return { $: "ADT", n: tld.n, g: tld.g, T: tld.T, c: tld.c.filter((c) => !r.has(c.k)) };
 }
 
-export const BEND_DIR = import.meta.url.startsWith("file:///$bunfs/")
+function path_fwd(p: string): string {
+  return p.replace(/\\/g, "/");
+}
+
+export const BEND_DIR = path_fwd(import.meta.url.startsWith("file:///$bunfs/")
   ? path.join(path.dirname(fs.realpathSync(process.execPath)), "..", "bend2")
-  : url.fileURLToPath(new URL(".", import.meta.url));
-export const BASE_BEND = fs.realpathSync(path.join(BEND_DIR, "base.bend"));
-const BEND_LIB = path.resolve(process.env.BEND_LIB ?? path.join(os.homedir(), ".bend", "lib"));
+  : url.fileURLToPath(new URL(".", import.meta.url)));
+export const BASE_BEND = path_fwd(fs.realpathSync(path.join(BEND_DIR, "base.bend")));
+const BEND_LIB = path_fwd(path.resolve(process.env.BEND_LIB ?? path.join(os.homedir(), ".bend", "lib")));
 export const BEND_HUB   = process.env.BEND_HUB ?? "https://hub.bend-lang.com";
 
 export const NAMED = /^([a-z][a-z0-9-]{0,63})@((?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){3})$/;
@@ -947,6 +951,7 @@ async function name_hash(book: Book, nv: string, spn?: Span): Promise<string> {
 }
 
 async function book_file(book: Book, file: string, spn?: Span): Promise<string> {
+  file = path_fwd(file);
   if (file.startsWith(BEND_LIB + "/") && !fs.existsSync(file)) {
     const pkg = file.slice(BEND_LIB.length + 1).split("/")[0];
     const man = await hub_get(book, pkg + "/manifest", pkg.slice(2), spn);
@@ -962,7 +967,7 @@ async function book_file(book: Book, file: string, spn?: Span): Promise<string> 
   if (!fs.existsSync(file)) {
     throw Err(book, ctx_nil(), "no such file: " + file, undefined, spn);
   }
-  return fs.realpathSync(file);
+  return path_fwd(fs.realpathSync(file));
 }
 
 export async function book_load(book: Book, file: string, ns: string, seen: Map<string, string | null>, spn?: Span, root?: string): Promise<number> {
@@ -1016,7 +1021,7 @@ export async function book_load(book: Book, file: string, ns: string, seen: Map<
       throw bad();
     }
     const got = await book_file(book, hub(as) ? BEND_LIB + "/" + rel : path.posix.resolve(dir, rel), sp);
-    const lib = fs.existsSync(BEND_LIB) ? fs.realpathSync(BEND_LIB) + "/" : "\0";
+    const lib = fs.existsSync(BEND_LIB) ? path_fwd(fs.realpathSync(BEND_LIB)) + "/" : "\0";
     const in_lib = got.startsWith(lib);
     const sub = (in_lib ? got.slice(lib.length)
       : path.posix.relative(top, got)).replace(/\.bend$/, "");

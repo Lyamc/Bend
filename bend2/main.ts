@@ -389,8 +389,12 @@ async function cli_checkup(file: string): Promise<void> {
   }
 }
 
+function path_fwd(p: string): string {
+  return p.replace(/\\/g, "/");
+}
+
 function path_real(p: string): string {
-  return fs.existsSync(p) ? fs.realpathSync(p) : path.resolve(p);
+  return path_fwd(fs.existsSync(p) ? fs.realpathSync(p) : path.resolve(p));
 }
 
 // same_file compares device and inode, so links to one file agree.
@@ -476,24 +480,27 @@ function cc_find(gpu: boolean): string {
     + " or newer to build " + (gpu ? "a GPU program" : "binaries") + " (found "
     + olds.join(", ") + "); on Debian/Ubuntu: curl -fsSL"
     + " https://apt.llvm.org/llvm.sh | sudo bash -s 19; on macOS: xcode-select"
-    + " --install";
+    + " --install; on Windows: install LLVM from https://llvm.org and put"
+    + " clang on PATH (GPU binaries need clang 19+)";
 }
 
 // cli_build builds the C file at `file` into the binary `bin`. A `!` program
-// builds with the GPU lane and writes its GPU program too (on Linux only with
-// CUDA at the first of $CUDA_HOME, $CUDA_PATH, /usr/local/cuda and /opt/cuda
-// (Arch's) that holds nvrtc.h, its libraries in lib64 or, as nix lays them,
-// lib; else the ! runs on the cores, and the build says so). On macOS a
-// program with a framework (#import: a window, audio) builds as Objective-C;
-// on Linux it links the X11 (plus libdl, for dlopen before glibc 2.34) and
-// ALSA libraries it includes.
+// builds with the GPU lane and writes its GPU program too (with CUDA at the
+// first of $CUDA_HOME, $CUDA_PATH, /usr/local/cuda and /opt/cuda that holds
+// nvrtc.h, its libraries in lib64, lib, or Windows lib/x64; else the ! runs
+// on the cores, and the build says so). On macOS a program with a framework
+// (#import: a window, audio) builds as Objective-C; on Linux it links the
+// X11 (plus libdl, for dlopen before glibc 2.34) and ALSA libraries it
+// includes. On Windows the generated C pulls ws2_32, user32, gdi32 and winmm
+// with pragma comment, and the link gets a 256 MiB stack.
 // The GPU program's build runs without the user's $BENDRTS.
 function cli_build(bin: string, file: string): void {
   const c     = fs.readFileSync(file, "utf8");
   const mac   = process.platform === "darwin";
+  const win   = process.platform === "win32";
   const cuda  = [process.env.CUDA_HOME, process.env.CUDA_PATH,
     "/usr/local/cuda", "/opt/cuda"]
-    .find(d => d && fs.existsSync(d + "/include/nvrtc.h")) ?? "";
+    .find(d => d && fs.existsSync(path.join(d, "include", "nvrtc.h"))) ?? "";
   const uses  = !/^#define BANGS\s+0$/m.test(c);
   const bangs = uses && (mac || cuda !== "");
   if (uses && !bangs) {
@@ -503,19 +510,22 @@ function cli_build(bin: string, file: string): void {
   const cc    = cc_find(bangs);
   const objc  = mac && (bangs || /^#import /m.test(c))
     ? ["-x", "objective-c", "-fobjc-arc", "-fmodules"] : [];
-  const libs  = [["X11", "X11", "dl"], ["alsa", "asound"]].flatMap(([h, ...ls]) =>
+  const libs  = win ? [] : [["X11", "X11", "dl"], ["alsa", "asound"]].flatMap(([h, ...ls]) =>
     !mac && c.includes("#include <" + h + "/") ? ls.map((l) => "-l" + l) : []);
-  const cpu = [...objc, "-std=c11", "-O3", file, "-lpthread", "-lm",
-    ...libs, "-o", path.resolve(bin)];
+  const out   = win && !/\.[A-Za-z0-9]+$/.test(bin) ? bin + ".exe" : bin;
+  const cpu = [...objc, "-std=c11", "-O3", file,
+    ...(win ? ["-Wl,/STACK:268435456"] : ["-lpthread", "-lm"]),
+    ...libs, "-o", path.resolve(out)];
   const gpu = mac ? ["-DBEND_METAL=1", ...cpu]
-    : ["-DBEND_CUDA=1", "-I" + cuda + "/include", "-L" + cuda + "/lib64",
-      "-L" + cuda + "/lib", ...cpu, "-lcuda", "-lnvrtc"];
+    : ["-DBEND_CUDA=1", "-I" + path.join(cuda, "include"),
+      "-L" + path.join(cuda, win ? "lib/x64" : "lib64"),
+      "-L" + path.join(cuda, "lib"), ...cpu, "-lcuda", "-lnvrtc"];
   const steps: [string, string[]][] = bangs
-    ? [[cc, gpu], [path.resolve(bin), ["+RTS", "--gpu-build"]]] : [[cc, cpu]];
+    ? [[cc, gpu], [path.resolve(out), ["+RTS", "--gpu-build"]]] : [[cc, cpu]];
   for (const [cmd, args] of steps) {
     if (child.spawnSync(cmd, args, { stdio: "inherit",
       env: { ...process.env, BENDRTS: "" } }).status !== 0) {
-      throw "Error: " + path.basename(cmd) + " failed to build " + bin;
+      throw "Error: " + path.basename(cmd) + " failed to build " + out;
     }
   }
 }
@@ -803,7 +813,9 @@ async function cli_login(): Promise<string> {
   }
   cli_say(2, "log in at " + st.verify_url + "\n");
   try {
-    Bun.spawn([process.platform === "darwin" ? "open" : "xdg-open", st.verify_url], { stdout: "ignore", stderr: "ignore" });
+    Bun.spawn(process.platform === "darwin" ? ["open", st.verify_url]
+      : process.platform === "win32" ? ["cmd", "/c", "start", "", st.verify_url]
+      : ["xdg-open", st.verify_url], { stdout: "ignore", stderr: "ignore" });
   } catch {}
   const until = Date.parse(st.expires_at ?? "") || Date.now() + 600000;
   while (Date.now() < until) {
@@ -838,8 +850,8 @@ async function cli_login(): Promise<string> {
 function pkg_files(file: string, book: Bend.Book,
   seen: Map<string, string | null>): Record<string, string> {
   const ent = fs.realpathSync(file);
-  const dir = path.join(path.dirname(ent), "/");
-  if (dir !== path.join(fs.realpathSync(path.dirname(file)), "/")) {
+  const dir = path_fwd(path.join(path.dirname(ent), "/"));
+  if (dir !== path_fwd(path.join(fs.realpathSync(path.dirname(file)), "/"))) {
     throw "Error: " + file + " cannot be published: it links to " + ent
       + ", in another directory; publish that file";
   }
@@ -853,7 +865,7 @@ function pkg_files(file: string, book: Bend.Book,
   ...Object.entries(book.tlds).flatMap(([k, tld]): [string, string][] =>
     tld.$ !== "Def" || tld.i === undefined || tld.b === true
       || k.startsWith("0x") ? [] : tld.i.map((f) =>
-      [path.posix.normalize(f.slice(dir.length)), f]))];
+      [path.posix.normalize(path_fwd(f).slice(dir.length)), f]))];
   // .bend files come first, so a foreign file's .bend, its directory a
   // prefix of the file's path, is checked inside dir before its path is cut
   const files: Record<string, string> = {};
@@ -888,7 +900,7 @@ function pkg_files(file: string, book: Bend.Book,
 // importer's fetch drops the mark, so a file sent with one would never
 // match its hash.
 function pkg_read(p: string, src: string, dir: string, fix: string): string {
-  const real = fs.realpathSync(src);
+  const real = path_fwd(fs.realpathSync(src));
   if (!real.startsWith(dir)) {
     throw "Error: " + src + " cannot be published: it is outside " + dir
       + " (the entry's directory); " + fix + " inside";

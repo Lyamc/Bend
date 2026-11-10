@@ -1,6 +1,7 @@
 // Process
 // =======
 
+#ifndef _WIN32
 #include <spawn.h>
 #include <sys/wait.h>
 #ifdef __APPLE__
@@ -12,6 +13,7 @@
 #endif
 
 extern char** environ;
+#endif
 
 typedef struct {
   char** argv;
@@ -66,6 +68,7 @@ static void process_append(ProcessCall* p, bool error, const char* data,
   *len = need;
 }
 
+#ifndef _WIN32
 // A descriptor that polls readable once the child exits.
 static int process_exitfd(pid_t child) {
 #ifdef __APPLE__
@@ -321,6 +324,225 @@ done:
     }
   }
 }
+
+#endif
+
+#ifdef _WIN32
+
+// CreateProcess, no shell. A thread writes stdin so a full pipe cannot
+// stall the reads. A timeout terminates the process.
+static char* process_quote(char** buf, u64* n, u64* cap, const char* s) {
+  u64 need = *n + 3;
+  for (const char* c = s; *c != 0; c += 1) {
+    need += *c == '"' || *c == '\\' ? 2 : 1;
+  }
+  if (need > *cap) {
+    while (*cap < need) {
+      *cap = *cap ? *cap * 2 : 64;
+    }
+    *buf = io_mem(realloc(*buf, *cap));
+  }
+  bool quote = s[0] == 0;
+  for (const char* c = s; *c != 0 && !quote; c += 1) {
+    quote = *c == ' ' || *c == '\t' || *c == '"';
+  }
+  if (quote) {
+    (*buf)[(*n)++] = '"';
+  }
+  u32 slash = 0;
+  for (const char* c = s; *c != 0; c += 1) {
+    if (*c == '\\') {
+      slash += 1;
+      continue;
+    }
+    if (*c == '"') {
+      for (u32 i = 0; i < slash * 2 + 1; i += 1) {
+        (*buf)[(*n)++] = '\\';
+      }
+      slash = 0;
+      (*buf)[(*n)++] = '"';
+      continue;
+    }
+    while (slash > 0) {
+      (*buf)[(*n)++] = '\\';
+      slash -= 1;
+    }
+    (*buf)[(*n)++] = *c;
+  }
+  while (slash > 0) {
+    (*buf)[(*n)++] = quote ? '\\' : '\\';
+    if (quote) {
+      (*buf)[(*n)++] = '\\';
+    }
+    slash -= 1;
+  }
+  if (quote) {
+    (*buf)[(*n)++] = '"';
+  }
+  return *buf;
+}
+
+typedef struct {
+  HANDLE h;
+  const char* p;
+  u64 n;
+} ProcessWrite;
+
+static DWORD WINAPI process_write(LPVOID arg) {
+  ProcessWrite* w = arg;
+  for (u64 at = 0; at < w->n;) {
+    DWORD k = 0;
+    DWORD m = w->n - at > 65536 ? 65536 : (DWORD)(w->n - at);
+    if (!WriteFile(w->h, w->p + at, m, &k, NULL) || k == 0) {
+      break;
+    }
+    at += k;
+  }
+  CloseHandle(w->h);
+  return 0;
+}
+
+static void process_call(IoWork* w) {
+  ProcessCall* p = (ProcessCall*)w->data;
+  HANDLE in[2] = { NULL, NULL };
+  HANDLE out[2] = { NULL, NULL };
+  HANDLE err[2] = { NULL, NULL };
+  HANDLE thread = NULL;
+  PROCESS_INFORMATION pi;
+  STARTUPINFOA si;
+  ProcessWrite wr = { NULL, NULL, 0 };
+  u64 deadline = 0;
+  bool open_out = true;
+  bool open_err = true;
+  memset(&pi, 0, sizeof pi);
+  memset(&si, 0, sizeof si);
+  u64 cap = 64;
+  u64 len = 0;
+  char* cmd = io_mem(malloc(cap));
+  SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
+  for (u32 i = 0; i < p->argc; i += 1) {
+    if (i != 0) {
+      if (len + 1 >= cap) {
+        cap *= 2;
+        cmd = io_mem(realloc(cmd, cap));
+      }
+      cmd[len++] = ' ';
+    }
+    process_quote(&cmd, &len, &cap, p->argv[i]);
+  }
+  cmd[len] = 0;
+  if (len >= 32768) {
+    p->code = E2BIG;
+    free(cmd);
+    return;
+  }
+  if (!CreatePipe(&in[0], &in[1], &sa, 0)
+    || !CreatePipe(&out[0], &out[1], &sa, 0)
+    || !CreatePipe(&err[0], &err[1], &sa, 0)) {
+    p->code = EIO;
+    goto done;
+  }
+  SetHandleInformation(in[1], HANDLE_FLAG_INHERIT, 0);
+  SetHandleInformation(out[0], HANDLE_FLAG_INHERIT, 0);
+  SetHandleInformation(err[0], HANDLE_FLAG_INHERIT, 0);
+  si.cb = sizeof si;
+  si.dwFlags = STARTF_USESTDHANDLES;
+  si.hStdInput = in[0];
+  si.hStdOutput = out[1];
+  si.hStdError = err[1];
+  if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL,
+    NULL, &si, &pi)) {
+    DWORD e = GetLastError();
+    p->code = e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND
+      ? ENOENT : EIO;
+    goto done;
+  }
+  CloseHandle(in[0]); in[0] = NULL;
+  CloseHandle(out[1]); out[1] = NULL;
+  CloseHandle(err[1]); err[1] = NULL;
+  if (p->input_len == 0) {
+    CloseHandle(in[1]); in[1] = NULL;
+  } else {
+    wr.h = in[1];
+    wr.p = p->input;
+    wr.n = p->input_len;
+    thread = CreateThread(NULL, 0, process_write, &wr, 0, NULL);
+    in[1] = NULL;
+    if (thread == NULL) {
+      CloseHandle(wr.h);
+      p->code = EIO;
+    }
+  }
+  deadline = io_tick() + (u64)p->timeout * 1000000ull;
+  while (p->code == 0 && (open_out || open_err
+    || WaitForSingleObject(pi.hProcess, 0) == WAIT_TIMEOUT)) {
+    if (io_tick() >= deadline) {
+      p->code = ETIMEDOUT;
+      break;
+    }
+    HANDLE rd[2] = { out[0], err[0] };
+    bool* live[2] = { &open_out, &open_err };
+    bool got = false;
+    for (int i = 0; i < 2; i += 1) {
+      if (!*live[i]) {
+        continue;
+      }
+      DWORD avail = 0;
+      if (!PeekNamedPipe(rd[i], NULL, 0, NULL, &avail, NULL)) {
+        *live[i] = false;
+        continue;
+      }
+      if (avail == 0) {
+        continue;
+      }
+      char buf[8192];
+      DWORD n = 0;
+      if (!ReadFile(rd[i], buf, avail > sizeof buf ? sizeof buf : avail, &n,
+        NULL)) {
+        *live[i] = false;
+        continue;
+      }
+      if (n == 0) {
+        *live[i] = false;
+        continue;
+      }
+      process_append(p, i == 1, buf, n);
+      got = true;
+    }
+    if (!got) {
+      WaitForSingleObject(pi.hProcess, 10);
+    }
+  }
+  if (p->code != 0 && pi.hProcess != NULL) {
+    TerminateProcess(pi.hProcess, 1);
+  }
+  if (thread != NULL) {
+    WaitForSingleObject(thread, 2000);
+    CloseHandle(thread);
+    thread = NULL;
+  }
+  if (p->code == 0) {
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD status = 1;
+    GetExitCodeProcess(pi.hProcess, &status);
+    p->status = status;
+  }
+done:
+  free(cmd);
+  if (thread != NULL) {
+    WaitForSingleObject(thread, 2000);
+    CloseHandle(thread);
+  }
+  HANDLE all[] = { in[0], in[1], out[0], out[1], err[0], err[1],
+    pi.hProcess, pi.hThread };
+  for (u32 i = 0; i < sizeof all / sizeof *all; i += 1) {
+    if (all[i] != NULL) {
+      CloseHandle(all[i]);
+    }
+  }
+}
+
+#endif
 
 static Term process_pack(Env e, IoWork* w) {
   ProcessCall* p = (ProcessCall*)w->data;
