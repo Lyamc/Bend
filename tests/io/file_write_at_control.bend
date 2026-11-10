@@ -1,4 +1,3 @@
-# windows: skip
 # Fault injection distinguishes retrying EINTR, advancing after a short
 # write, and returning an error when progress stops or the host fails.
 # EINTR is injected on C; JS keeps the host's writeSync retry behavior.

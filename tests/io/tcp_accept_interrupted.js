@@ -5,6 +5,15 @@ let interrupted_errno;
 let interrupted_pending = false;
 
 function interrupted_port(listener) {
+  if (process.platform === "win32") {
+    const sys = io_sys();
+    const addr = new Uint8Array(16);
+    const len = new Uint32Array([16]);
+    if (sys.getsockname(listener, sys.ptr(addr), sys.ptr(len)) < 0) {
+      throw new Error("getsockname failed");
+    }
+    return io_tup(listener, (addr[2] << 8) | addr[3]);
+  }
   const sys = io_sys();
   const ffi = require("bun:ffi");
   const lib = ffi.dlopen(sys.mac ? "libSystem.dylib" : "libc.so.6", {

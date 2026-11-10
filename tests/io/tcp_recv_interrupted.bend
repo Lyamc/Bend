@@ -1,4 +1,3 @@
-# windows: skip
 # EINTR on a recv must retry the read, not fail it.
 import Base
 import ./tcp_bytes.bend as TCPTest

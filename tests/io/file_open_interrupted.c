@@ -1,3 +1,4 @@
+#ifndef _WIN32
 #include <dlfcn.h>
 #include <stdarg.h>
 
@@ -25,7 +26,31 @@ int open(const char* path, int flags, ...) {
   return real(path, flags, mode);
 }
 
+#else
+
+static int interrupted_stage = -1;
+
+static int interrupted_open(const char* path, int flags, int mode, int* out) {
+  (void)mode;
+  if (interrupted_stage >= 0 && strcmp(path, "/dev/null") == 0) {
+    if (interrupted_stage++ < 2) {
+      errno = EINTR;
+      *out = -1;
+      return 1;
+    }
+    if (interrupted_stage > 3) {
+      err_fail("open retried a result other than EINTR");
+    }
+  }
+  return 0;
+}
+
+#endif
+
 Term interrupted_arm_run(Env e, Term* f, IoWork* w) {
+#ifdef _WIN32
+  win_on_open = interrupted_open;
+#endif
   interrupted_stage = 0;
   return term_pak(CID(Unit), 0);
 }
@@ -35,6 +60,9 @@ Term interrupted_check_run(Env e, Term* f, IoWork* w) {
     err_fail("open did not retry both interruptions");
   }
   interrupted_stage = -1;
+#ifdef _WIN32
+  win_on_open = NULL;
+#endif
   return term_pak(CID(Unit), 0);
 }
 

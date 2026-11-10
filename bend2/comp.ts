@@ -5486,6 +5486,9 @@ static Term io_wait_on(IoWork* w, int fd, short evts, u64 time, IoPack more) {
 }
 
 static void io_lost(void) {
+#ifdef _WIN32
+  win_epipe_stdio();
+#endif
   if (errno == EPIPE) {
     signal(SIGPIPE, SIG_DFL);
     raise(SIGPIPE);
@@ -6175,9 +6178,8 @@ function cli(argv) {
 // ==
 
 // Apple arm64 passes variadic fcntl flags on the stack, so io_sys passes
-// them as the ninth argument. A parked effect waits for fd (a write when
-// out) and/or until at; once due, io_wait calls more and resumes k with its
-// value, or parks it again on undefined. Waits stay in deadline order.
+// them as the ninth argument. A parked effect waits for fd and/or until at;
+// once due, io_wait calls more and resumes k with its value.
 
 function io_exit(main) {
   try {
@@ -6201,11 +6203,9 @@ function io_out(fd, data) {
       if (e.code === "EAGAIN" || e.code === "EINTR") {
         continue;
       }
-      // Bun ignores SIGPIPE until a listener comes and goes.
-      if (e.code === "EPIPE") {
-        process.on("SIGPIPE", () => {}).removeAllListeners("SIGPIPE")
-          .kill(process.pid, "SIGPIPE");
-      }
+      if (e.code === "EPIPE" && process.platform === "win32") process.exit(141);
+      if (e.code === "EPIPE") process.on("SIGPIPE", () => {})
+        .removeAllListeners("SIGPIPE").kill(process.pid, "SIGPIPE");
       try {
         fs.writeSync(2, "bend: a short write on a standard stream\n");
       } catch (o) {

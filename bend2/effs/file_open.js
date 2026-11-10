@@ -15,6 +15,23 @@ function file_open_with(name, mode) {
   if (process.platform === "win32" && name === "/etc/hosts") {
     name = (process.env.SystemRoot || "C:\\Windows") + "\\System32\\drivers\\etc\\hosts";
   }
+  if (process.platform === "win32" && name === "/dev/null") {
+    if (mode === "x") {
+      return io_fail(17);
+    }
+    name = "NUL";
+  }
+  if (process.platform === "win32" && globalThis.BEND_FIFO_HAS?.(name)) {
+    io_sys();
+    const fd = globalThis.BEND_FIFO_OPEN(name, mode);
+    if (fd < 0) {
+      return io_fail(io_sys().errno() || 5);
+    }
+    if (mode === "a") {
+      io_file_append.add(fd);
+    }
+    return io_done(fd);
+  }
   if (process.platform === "win32" && name === "/dev/zero") {
     const held = globalThis.BEND_ZERO ?? (globalThis.BEND_ZERO = new Set());
     const fd = -(held.size + 2);

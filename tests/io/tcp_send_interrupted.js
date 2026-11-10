@@ -5,6 +5,13 @@ let interrupted_errno;
 let interrupted_pending = false;
 
 function interrupted_pair() {
+  if (process.platform === "win32") {
+    const p = new Int32Array(2);
+    if (io_sys().socketpair(p)) {
+      throw new Error("socketpair failed");
+    }
+    return io_tup(p[0], p[1]);
+  }
   const sys = io_sys();
   const ffi = require("bun:ffi");
   const lib = ffi.dlopen(sys.mac ? "libSystem.dylib" : "libc.so.6", {

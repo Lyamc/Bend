@@ -1,4 +1,3 @@
-# windows: skip
 # EINTR on a recvfrom must retry the read, not fail it, in every recv API.
 import Base
 import ./udp_bytes.bend as UDPTest

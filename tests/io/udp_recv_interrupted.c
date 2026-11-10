@@ -1,8 +1,11 @@
+#ifndef _WIN32
 #include <dlfcn.h>
+#endif
 
 static int interrupted_fd = -1;
 static u32 interrupted_stage;
 
+#ifndef _WIN32
 // Interrupt the first recvfrom, then let the retry read for real.
 ssize_t recvfrom(int fd, void* data, size_t size, int flags,
   struct sockaddr* addr, socklen_t* len) {
@@ -14,6 +17,22 @@ ssize_t recvfrom(int fd, void* data, size_t size, int flags,
   }
   return real(fd, data, size, flags, addr, len);
 }
+#else
+static int interrupted_recvfrom(int fd, void* data, size_t size, int flags,
+  struct sockaddr* addr, int* len, ssize_t* out) {
+  (void)data;
+  (void)size;
+  (void)flags;
+  (void)addr;
+  (void)len;
+  if (fd == interrupted_fd && interrupted_stage++ == 0) {
+    errno = EINTR;
+    *out = -1;
+    return 1;
+  }
+  return 0;
+}
+#endif
 
 Term interrupted_port_run(Env e, Term* f, IoWork* w) {
   int fd = (int)io_hand_v(f[0]);
@@ -28,6 +47,9 @@ Term interrupted_port_run(Env e, Term* f, IoWork* w) {
 Term interrupted_arm_run(Env e, Term* f, IoWork* w) {
   interrupted_fd = (int)io_hand_v(f[0]);
   interrupted_stage = 0;
+#ifdef _WIN32
+  win_on_recvfrom = interrupted_recvfrom;
+#endif
   return f[0];
 }
 
@@ -36,6 +58,9 @@ Term interrupted_check_run(Env e, Term* f, IoWork* w) {
     err_fail("the recvfrom did not retry after its interruption");
   }
   interrupted_fd = -1;
+#ifdef _WIN32
+  win_on_recvfrom = NULL;
+#endif
   return f[0];
 }
 

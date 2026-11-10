@@ -74,9 +74,48 @@ bun bend2/main.ts demos/io_hello_world/main.bend
   `%LIB%` for a bare `delayimp.lib`; from an MSYS2 shell, run the VS
   developer environment first, or the link cannot see the import library.
 
-Tests that need POSIX only (a `/bin` program, a FIFO, `EINTR`, or
-`libc.so.6`) start with `# windows: skip`. On Windows, `bend file.bend`
-prints `bend: skipped on windows: ...` and does not run them.
+## FIFOs
+
+`mkfifo` of a POSIX path such as `/tmp/bend_fifo_1` does not create a file.
+It registers that path. The pipe object is
+
+```text
+\\.\pipe\bend
+```
+
+plus the path with every `/`, `\`, and `:` replaced by `_`. The example is
+`\\.\pipe\bend_tmp_bend_fifo_1`. The read end is `CreateNamedPipe` (byte
+mode, overlapped, `PIPE_WAIT`). The write end is `CreateFile` on that name.
+A read after the writer closes is end of file, as on Linux. A nonblocking
+read of an empty pipe is `EAGAIN`. A write after the reader is gone maps
+`ERROR_BROKEN_PIPE` and `ERROR_NO_DATA` to `EPIPE`.
+
+## EINTR and EPIPE
+
+The C tests that interrupt one call do it with a hook inside `win_open`,
+`win_read`, `win_write`, `pwrite`, and the Winsock wrappers, because a
+Windows build `#define`s those names onto the shim before the test is
+compiled. `select` watches one extra loopback socket. `pthread_kill` writes
+a byte there and the wait returns `EINTR` without marking the program's
+fds. The JS runner arms the same result with a deadline on `WSAPoll`: when
+it fires, the call returns `EINTR` and no fd is ready. Neither path is on
+unless a test asks for it.
+
+A write to a standard stream whose reader is gone is `EPIPE`. Windows has
+no `SIGPIPE`, so that process exits 141, the status a shell reports for
+`SIGPIPE`. `Epipe.write` runs the write in a child of the same executable
+(there is no `fork` that can return into the parent computation).
+
+## Still skipped
+
+These start with `# windows: skip`. On Windows, `bend file.bend` prints
+`bend: skipped on windows: ...` and does not run them.
+
+- `tests/proof/app/main.bend`, an endless loop the Linux suite never runs
+- `Process.run` of `/bin/*` (`process_run`, `process_run_no_shell`,
+  `process_run_non_scalar`, `process_run_parallel`,
+  `process_run_node_module`)
+- `bundle_inline` pages whose names contain `"` (Windows file names cannot)
 
 ## Updating from upstream
 

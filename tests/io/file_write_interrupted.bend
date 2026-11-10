@@ -1,4 +1,3 @@
-# windows: skip
 # Interrupted writes must resume at the first byte not yet written.
 import Base
 import ./file_binary.bend as T

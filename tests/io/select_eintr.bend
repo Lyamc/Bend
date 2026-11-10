@@ -1,4 +1,3 @@
-# windows: skip
 # io (io_select_eintr): a signal that lands while the loop waits in
 # select wakes nothing. Idle.park installs a no-op handler, has the
 # signal arrive a few ms later, and parks on a pipe nobody writes, so any

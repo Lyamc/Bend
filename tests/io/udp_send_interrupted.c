@@ -1,9 +1,14 @@
+#ifndef _WIN32
 #include <dlfcn.h>
+#endif
+#ifndef _WIN32
 #include <poll.h>
+#endif
 
 static int interrupted_fd = -1;
 static u32 interrupted_stage;
 
+#ifndef _WIN32
 ssize_t sendto(int fd, const void* data, size_t size, int flags,
   const struct sockaddr* addr, socklen_t len) {
   if (fd == interrupted_fd && interrupted_stage++ < 2) {
@@ -14,6 +19,22 @@ ssize_t sendto(int fd, const void* data, size_t size, int flags,
     = dlsym(RTLD_NEXT, "sendto");
   return real(fd, data, size, flags, addr, len);
 }
+#else
+static int interrupted_sendto(int fd, const void* data, size_t size, int flags,
+  const struct sockaddr* addr, int len, ssize_t* out) {
+  (void)data;
+  (void)size;
+  (void)flags;
+  (void)addr;
+  (void)len;
+  if (fd == interrupted_fd && interrupted_stage++ < 2) {
+    errno = EINTR;
+    *out = -1;
+    return 1;
+  }
+  return 0;
+}
+#endif
 
 Term interrupted_port_run(Env e, Term* f, IoWork* w) {
   int fd = (int)io_hand_v(f[0]);
@@ -28,12 +49,18 @@ Term interrupted_port_run(Env e, Term* f, IoWork* w) {
 Term interrupted_arm_run(Env e, Term* f, IoWork* w) {
   interrupted_fd = (int)io_hand_v(f[0]);
   interrupted_stage = 0;
+#ifdef _WIN32
+  win_on_sendto = interrupted_sendto;
+#endif
   return f[0];
 }
 
 Term interrupted_check_run(Env e, Term* f, IoWork* w) {
   int fd = (int)io_hand_v(f[0]);
   interrupted_fd = -1;
+#ifdef _WIN32
+  win_on_sendto = NULL;
+#endif
   struct pollfd ready = {fd, POLLIN, 0};
   char data[64];
   const u8 want[] = {97, 195, 169, 206, 187, 122};

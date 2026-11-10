@@ -48,8 +48,22 @@ function file_read_with(file, max, offset, pack, line = false) {
     const want = line && got < len ? 1 : Math.min(b.length, len) - got;
     let n;
     try {
-      n = fs.readvSync(file, [b.subarray(got, got + want)],
-        offset === null ? null : offset + got);
+      if (globalThis.BEND_FIFO?.has(file) && globalThis.BEND_FIFO_READ) {
+        n = globalThis.BEND_FIFO_READ(file, b.subarray(got, got + want));
+        if (n < 0) {
+          const err = io_sys().errno() || 5;
+          if (err === 4) {
+            continue;
+          }
+          if (got === 0) {
+            return io_tup(file, io_fail(err));
+          }
+          break;
+        }
+      } else {
+        n = fs.readvSync(file, [b.subarray(got, got + want)],
+          offset === null ? null : offset + got);
+      }
     } catch (e) {
       // libuv retries EINTR for most calls, but not for read
       if (Math.abs(e.errno) === 4) {

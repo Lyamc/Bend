@@ -354,6 +354,23 @@ static int munmap(void* p, size_t n) {
 static SOCKET win_sok(int fd);
 static ssize_t win_send(int fd, const void* buf, size_t n, int flags);
 static ssize_t win_recv(int fd, void* buf, size_t n, int flags);
+static SOCKET win_wake_r = INVALID_SOCKET;
+static SOCKET win_wake_w = INVALID_SOCKET;
+static int win_sig_on = 0;
+#define WIN_FIFO_BIT 0x40000000u
+static unsigned win_file_flags[65536];
+static int (*win_on_open)(const char*, int, int, int*);
+static int (*win_on_read)(int, void*, size_t, ssize_t*);
+static int (*win_on_write)(int, const void*, size_t, ssize_t*);
+static int (*win_on_pwrite)(int, const void*, size_t, long long, ssize_t*);
+static int (*win_on_send)(int, const void*, size_t, int, ssize_t*);
+static int (*win_on_recv)(int, void*, size_t, int, ssize_t*);
+static int (*win_on_recvfrom)(int, void*, size_t, int, struct sockaddr*, int*,
+  ssize_t*);
+static int (*win_on_accept)(int, struct sockaddr*, int*, int*);
+static int (*win_on_connect)(int, const struct sockaddr*, int, int*);
+static int (*win_on_sendto)(int, const void*, size_t, int, const struct sockaddr*,
+  int, ssize_t*);
 
 #ifdef select
 #undef select
@@ -367,8 +384,8 @@ static int win_select(int nfds, fd_set* rfds, fd_set* wfds, fd_set* efds,
   unsigned char* w = (unsigned char*)wfds;
   int ms = tv == NULL ? -1
     : (int)(tv->tv_sec * 1000 + tv->tv_usec / 1000);
-  WSAPOLLFD* p = (WSAPOLLFD*)calloc((size_t)nfds, sizeof *p);
-  int* map = (int*)calloc((size_t)nfds, sizeof *map);
+  WSAPOLLFD* p = (WSAPOLLFD*)calloc((size_t)nfds + 1, sizeof *p);
+  int* map = (int*)calloc((size_t)nfds + 1, sizeof *map);
   if (p == NULL || map == NULL) {
     free(p);
     free(map);
@@ -376,6 +393,8 @@ static int win_select(int nfds, fd_set* rfds, fd_set* wfds, fd_set* efds,
     return -1;
   }
   int n = 0;
+  int fifo_fd[64];
+  int fifo_n = 0;
   for (int fd = 0; fd < nfds; fd += 1) {
     short ev = 0;
     if (r != NULL && (r[fd / 8] >> (fd % 8) & 1)) {
@@ -387,12 +406,30 @@ static int win_select(int nfds, fd_set* rfds, fd_set* wfds, fd_set* efds,
     if (ev == 0) {
       continue;
     }
+    if ((unsigned)fd < 65536u && (win_file_flags[fd] & WIN_FIFO_BIT)) {
+      if (fifo_n < 64) {
+        fifo_fd[fifo_n++] = fd | (ev & POLLRDNORM ? 0 : 0x10000);
+      }
+      continue;
+    }
     p[n].fd = win_sok(fd);
     p[n].events = ev;
     map[n] = fd;
     n += 1;
   }
-  int ret = n == 0 ? 0 : WSAPoll(p, (ULONG)n, ms);
+  int wake = -1;
+  if (win_wake_r != INVALID_SOCKET) {
+    p[n].fd = win_wake_r;
+    p[n].events = POLLRDNORM;
+    wake = n;
+    n += 1;
+  }
+  int slice = fifo_n == 0 ? ms : (ms < 0 || ms > 10 ? 10 : ms);
+  ULONGLONG start = GetTickCount64();
+  int ret = 0;
+  int ready = 0;
+  for (;;) {
+  ret = (n == 0 && fifo_n == 0) ? 0 : (n == 0 ? 0 : WSAPoll(p, (ULONG)n, slice));
   int bytes = (nfds + 7) / 8;
   if (r != NULL) {
     memset(r, 0, (size_t)bytes);
@@ -400,9 +437,22 @@ static int win_select(int nfds, fd_set* rfds, fd_set* wfds, fd_set* efds,
   if (w != NULL) {
     memset(w, 0, (size_t)bytes);
   }
-  int ready = 0;
+  ready = 0;
+  if (ret > 0 && wake >= 0
+    && (p[wake].revents & (POLLRDNORM | POLLIN | POLLHUP | POLLERR))) {
+    char dump[64];
+    while (recv(win_wake_r, dump, sizeof dump, 0) > 0) {
+    }
+    free(p);
+    free(map);
+    errno = EINTR;
+    return -1;
+  }
   if (ret > 0) {
     for (int i = 0; i < n; i += 1) {
+      if (i == wake) {
+        continue;
+      }
       int fd = map[i];
       if (p[i].revents & (POLLRDNORM | POLLHUP | POLLERR | POLLIN)) {
         if (r != NULL) {
@@ -418,9 +468,43 @@ static int win_select(int nfds, fd_set* rfds, fd_set* wfds, fd_set* efds,
       }
     }
   }
+  for (int i = 0; i < fifo_n; i += 1) {
+    int fd = fifo_fd[i] & 0xffff;
+    int want_read = (fifo_fd[i] & 0x10000) == 0;
+    HANDLE h = (HANDLE)_get_osfhandle(fd);
+    int up = 0;
+    if (!want_read) {
+      up = 1;
+    } else {
+      DWORD avail = 0;
+      if (PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL)) {
+        up = avail > 0;
+      } else {
+        DWORD e = GetLastError();
+        up = e == ERROR_BROKEN_PIPE || e == ERROR_PIPE_NOT_CONNECTED;
+      }
+    }
+    if (up) {
+      if (want_read && r != NULL) {
+        r[fd / 8] |= (unsigned char)(1 << (fd % 8));
+      }
+      if (!want_read && w != NULL) {
+        w[fd / 8] |= (unsigned char)(1 << (fd % 8));
+      }
+      ready += 1;
+    }
+  }
+  if (ready > 0 || fifo_n == 0 || ms == 0) {
+    break;
+  }
+  if (ms > 0 && (int)(GetTickCount64() - start) >= ms) {
+    break;
+  }
+  Sleep(slice > 0 ? (DWORD)slice : 1);
+  }
   free(p);
   free(map);
-  if (ret < 0) {
+  if (ret < 0 && ready == 0) {
     errno = win_wsa_errno();
     return -1;
   }
@@ -486,10 +570,60 @@ static int sigaltstack(stack_t* ss, void* old) {
   return 0;
 }
 
+static void win_wake_init(void) {
+  if (win_wake_r != INVALID_SOCKET) {
+    return;
+  }
+  win_init();
+  SOCKET li = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, 0);
+  struct sockaddr_in a;
+  memset(&a, 0, sizeof a);
+  a.sin_family = AF_INET;
+  a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  if (li == INVALID_SOCKET || bind(li, (struct sockaddr*)&a, sizeof a) != 0
+    || listen(li, 1) != 0) {
+    if (li != INVALID_SOCKET) {
+      closesocket(li);
+    }
+    return;
+  }
+  int alen = sizeof a;
+  getsockname(li, (struct sockaddr*)&a, &alen);
+  SOCKET c = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, 0);
+  if (c == INVALID_SOCKET || connect(c, (struct sockaddr*)&a, sizeof a) != 0) {
+    closesocket(li);
+    if (c != INVALID_SOCKET) {
+      closesocket(c);
+    }
+    return;
+  }
+  SOCKET s = accept(li, NULL, NULL);
+  closesocket(li);
+  if (s == INVALID_SOCKET) {
+    closesocket(c);
+    return;
+  }
+  u_long nb = 1;
+  ioctlsocket(s, FIONBIO, &nb);
+  win_wake_r = s;
+  win_wake_w = c;
+}
+
 static int sigaction(int sig, const struct sigaction* a, void* old) {
   (void)sig;
   (void)a;
   (void)old;
+  win_sig_on = 1;
+  win_wake_init();
+  return 0;
+}
+
+static int pthread_kill(pthread_t t, int sig) {
+  (void)t;
+  (void)sig;
+  if (win_sig_on && win_wake_w != INVALID_SOCKET) {
+    send(win_wake_w, "x", 1, 0);
+  }
   return 0;
 }
 
@@ -509,7 +643,230 @@ static int setenv(const char* k, const char* v, int overwrite) {
   return _putenv_s(k, v);
 }
 
-static unsigned win_file_flags[65536];
+#define WIN_FIFOS 32
+
+typedef struct {
+  char path[160];
+  char name[200];
+  int live;
+} win_fifo;
+
+static win_fifo win_fifos[WIN_FIFOS];
+
+static void win_fifo_pipe(const char* path, char* out, size_t n) {
+  snprintf(out, n, "\\\\.\\pipe\\bend");
+  size_t at = strlen(out);
+  for (const char* p = path; *p != 0 && at + 1 < n; p += 1) {
+    char c = (*p == '/' || *p == '\\' || *p == ':') ? '_' : *p;
+    out[at++] = c;
+  }
+  out[at] = 0;
+}
+
+static int win_fifo_id(const char* path) {
+  for (int i = 0; i < WIN_FIFOS; i += 1) {
+    if (win_fifos[i].live && strcmp(win_fifos[i].path, path) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+static void win_epipe_stdio(void) {
+  DWORD e = GetLastError();
+  if (e == ERROR_BROKEN_PIPE || e == ERROR_NO_DATA) {
+    errno = EPIPE;
+  }
+  if (errno == EPIPE && getenv("BEND_EPIPE_CHILD") != NULL) {
+    ExitProcess(141);
+  }
+}
+
+static void win_epipe_child(void) {
+  const char* ep = getenv("BEND_EPIPE_CHILD");
+  if (ep == NULL || ep[0] == 0) {
+    return;
+  }
+  FILE* out = ep[0] == '2' ? stderr : stdout;
+  setvbuf(out, NULL, _IONBF, 0);
+  if (fwrite("x\n", 1, 2, out) != 2 || fflush(out) != 0) {
+    ExitProcess(141);
+  }
+  ExitProcess(0);
+}
+
+static void __attribute__((constructor)) win_epipe_boot(void) {
+  win_epipe_child();
+}
+
+static int mkfifo(const char* path, int mode) {
+  (void)mode;
+  if (path == NULL || path[0] == 0) {
+    errno = EINVAL;
+    return -1;
+  }
+  if (win_fifo_id(path) >= 0) {
+    errno = EEXIST;
+    return -1;
+  }
+  for (int i = 0; i < WIN_FIFOS; i += 1) {
+    if (!win_fifos[i].live) {
+      snprintf(win_fifos[i].path, sizeof win_fifos[i].path, "%s", path);
+      win_fifo_pipe(path, win_fifos[i].name, sizeof win_fifos[i].name);
+      win_fifos[i].live = 1;
+      return 0;
+    }
+  }
+  errno = ENOSPC;
+  return -1;
+}
+
+static int win_fifo_unlink(const char* path) {
+  int id = win_fifo_id(path);
+  if (id >= 0) {
+    win_fifos[id].live = 0;
+    return 0;
+  }
+  return _unlink(path);
+}
+
+#define unlink win_fifo_unlink
+
+static int win_fifo_fd(HANDLE h, int flags) {
+  int fd = _open_osfhandle((intptr_t)h, flags & O_WRONLY ? 0 : _O_RDONLY);
+  if (fd < 0) {
+    CloseHandle(h);
+    errno = EMFILE;
+    return -1;
+  }
+  if ((unsigned)fd < 65536u) {
+    win_file_flags[fd] = (unsigned)flags | WIN_FIFO_BIT;
+  }
+  return fd;
+}
+
+static int win_fifo_open(const char* name, int flags) {
+  int wr = (flags & O_WRONLY) != 0 || (flags & O_RDWR) != 0;
+  if (!wr) {
+    HANDLE h = CreateNamedPipeA(name,
+      PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED,
+      PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1,
+      65536, 65536, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+      errno = EIO;
+      return -1;
+    }
+    OVERLAPPED ov;
+    memset(&ov, 0, sizeof ov);
+    ov.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
+    BOOL ok = ConnectNamedPipe(h, &ov);
+    if (!ok && GetLastError() == ERROR_IO_PENDING) {
+      if ((flags & O_NONBLOCK) == 0) {
+        WaitForSingleObject(ov.hEvent, INFINITE);
+        CloseHandle(ov.hEvent);
+      }
+    } else {
+      CloseHandle(ov.hEvent);
+      if (!ok && GetLastError() != ERROR_PIPE_CONNECTED) {
+        CloseHandle(h);
+        errno = EIO;
+        return -1;
+      }
+    }
+    return win_fifo_fd(h, flags);
+  }
+  HANDLE h = INVALID_HANDLE_VALUE;
+  for (int i = 0; i < 200 && h == INVALID_HANDLE_VALUE; i += 1) {
+    h = CreateFileA(name, GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+      Sleep(5);
+    }
+  }
+  if (h == INVALID_HANDLE_VALUE) {
+    errno = ENOENT;
+    return -1;
+  }
+  return win_fifo_fd(h, flags);
+}
+
+static int win_fifo_err(DWORD e, int writing) {
+  if (writing && (e == ERROR_BROKEN_PIPE || e == ERROR_NO_DATA)) {
+    errno = EPIPE;
+    return -1;
+  }
+  if (e == ERROR_NO_DATA || e == ERROR_PIPE_LISTENING) {
+    errno = EAGAIN;
+    return -1;
+  }
+  if (e == ERROR_BROKEN_PIPE || e == ERROR_PIPE_NOT_CONNECTED) {
+    return 0;
+  }
+  errno = EIO;
+  return -1;
+}
+
+static ssize_t win_fifo_io(HANDLE h, void* buf, size_t n, int writing, int block) {
+  OVERLAPPED ov;
+  memset(&ov, 0, sizeof ov);
+  ov.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
+  DWORD got = 0;
+  BOOL ok = writing
+    ? WriteFile(h, buf, n > 65536 ? 65536 : (DWORD)n, &got, &ov)
+    : ReadFile(h, buf, n > 65536 ? 65536 : (DWORD)n, &got, &ov);
+  if (!ok && GetLastError() == ERROR_IO_PENDING) {
+    if (!block) {
+      CancelIoEx(h, &ov);
+      WaitForSingleObject(ov.hEvent, 50);
+      CloseHandle(ov.hEvent);
+      errno = EAGAIN;
+      return -1;
+    }
+    WaitForSingleObject(ov.hEvent, INFINITE);
+    ok = GetOverlappedResult(h, &ov, &got, FALSE);
+  }
+  DWORD e = ok ? 0 : GetLastError();
+  CloseHandle(ov.hEvent);
+  if (ok) {
+    return (ssize_t)got;
+  }
+  if (!writing && (e == ERROR_BROKEN_PIPE || e == ERROR_PIPE_NOT_CONNECTED)) {
+    return 0;
+  }
+  return win_fifo_err(e, writing);
+}
+
+static ssize_t win_fifo_read(int fd, void* buf, size_t n) {
+  HANDLE h = (HANDLE)_get_osfhandle(fd);
+  int block = (win_file_flags[fd] & O_NONBLOCK) == 0;
+  if (!block) {
+    DWORD avail = 0;
+    if (!PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL)) {
+      DWORD e = GetLastError();
+      if (e == ERROR_BROKEN_PIPE || e == ERROR_PIPE_NOT_CONNECTED) {
+        return 0;
+      }
+      return win_fifo_err(e, 0);
+    }
+    if (avail == 0) {
+      errno = EAGAIN;
+      return -1;
+    }
+    if (avail < n) {
+      n = avail;
+    }
+  }
+  return win_fifo_io(h, buf, n, 0, 1);
+}
+
+static ssize_t win_fifo_write(int fd, const void* buf, size_t n) {
+  HANDLE h = (HANDLE)_get_osfhandle(fd);
+  DWORD got = 0;
+  if (WriteFile(h, buf, n > 65536 ? 65536 : (DWORD)n, &got, NULL)) {
+    return (ssize_t)got;
+  }
+  return win_fifo_err(GetLastError(), 1);
+}
 
 static int win_open(const char* path, int flags, ...) {
   int mode = _S_IREAD | _S_IWRITE;
@@ -518,6 +875,23 @@ static int win_open(const char* path, int flags, ...) {
     va_start(ap, flags);
     mode = va_arg(ap, int);
     va_end(ap);
+  }
+  if (win_on_open != NULL) {
+    int out = 0;
+    if (win_on_open(path, flags, mode, &out)) {
+      return out;
+    }
+  }
+  int fifo = win_fifo_id(path);
+  if (fifo >= 0) {
+    return win_fifo_open(win_fifos[fifo].name, flags);
+  }
+  if (path != NULL && strcmp(path, "/dev/null") == 0) {
+    if (flags & O_EXCL) {
+      errno = EEXIST;
+      return -1;
+    }
+    path = "NUL";
   }
   int fd = _open(path, flags | _O_BINARY, mode);
   if (fd >= 0 && (unsigned)fd < 65536u) {
@@ -539,6 +913,15 @@ static int win_is_sock(int fd) {
 }
 
 static ssize_t win_read(int fd, void* buf, size_t n) {
+  if (win_on_read != NULL) {
+    ssize_t out = 0;
+    if (win_on_read(fd, buf, n, &out)) {
+      return out;
+    }
+  }
+  if ((unsigned)fd < 65536u && (win_file_flags[fd] & WIN_FIFO_BIT)) {
+    return win_fifo_read(fd, buf, n);
+  }
   if (win_is_sock(fd)) {
     return win_recv(fd, buf, n, 0);
   }
@@ -546,10 +929,32 @@ static ssize_t win_read(int fd, void* buf, size_t n) {
 }
 
 static ssize_t win_write(int fd, const void* buf, size_t n) {
+  if (win_on_write != NULL) {
+    ssize_t out = 0;
+    if (win_on_write(fd, buf, n, &out)) {
+      return out;
+    }
+  }
+  if ((unsigned)fd < 65536u && (win_file_flags[fd] & WIN_FIFO_BIT)) {
+    return win_fifo_write(fd, buf, n);
+  }
   if (win_is_sock(fd)) {
     return win_send(fd, buf, n, 0);
   }
   return _write(fd, buf, n > INT_MAX ? INT_MAX : (unsigned)n);
+}
+
+static int win_dup2(int from, int to) {
+  if (to > 512) {
+    _setmaxstdio(to + 1 > 8192 ? 8192 : to + 1);
+  }
+  if (_dup2(from, to) < 0) {
+    return -1;
+  }
+  if ((unsigned)from < 65536u && (unsigned)to < 65536u) {
+    win_file_flags[to] = win_file_flags[from];
+  }
+  return to;
 }
 
 static SOCKET win_sok(int fd) {
@@ -568,6 +973,51 @@ static int win_sockfd(SOCKET s) {
     return -1;
   }
   return fd;
+}
+
+static int win_getsockname(int fd, struct sockaddr* a, int* n) {
+  if (getsockname(win_sok(fd), a, n) == 0) {
+    return 0;
+  }
+  errno = win_wsa_errno();
+  return -1;
+}
+
+static int socketpair(int domain, int type, int proto, int sv[2]) {
+  (void)domain;
+  (void)type;
+  (void)proto;
+  win_init();
+  SOCKET li = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, 0);
+  struct sockaddr_in a;
+  memset(&a, 0, sizeof a);
+  a.sin_family = AF_INET;
+  a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  if (li == INVALID_SOCKET || bind(li, (struct sockaddr*)&a, sizeof a) != 0
+    || listen(li, 1) != 0) {
+    if (li != INVALID_SOCKET) closesocket(li);
+    errno = EIO;
+    return -1;
+  }
+  int alen = sizeof a;
+  getsockname(li, (struct sockaddr*)&a, &alen);
+  SOCKET c = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, 0);
+  if (c == INVALID_SOCKET || connect(c, (struct sockaddr*)&a, sizeof a) != 0) {
+    closesocket(li);
+    if (c != INVALID_SOCKET) closesocket(c);
+    errno = EIO;
+    return -1;
+  }
+  SOCKET s = accept(li, NULL, NULL);
+  closesocket(li);
+  if (s == INVALID_SOCKET) {
+    closesocket(c);
+    errno = EIO;
+    return -1;
+  }
+  sv[0] = win_sockfd(s);
+  sv[1] = win_sockfd(c);
+  return sv[0] < 0 || sv[1] < 0 ? -1 : 0;
 }
 
 static int win_socket(int domain, int type, int proto) {
@@ -592,6 +1042,12 @@ static int win_listen(int fd, int backlog) {
 }
 
 static int win_connect(int fd, const struct sockaddr* a, int n) {
+  if (win_on_connect != NULL) {
+    int out = 0;
+    if (win_on_connect(fd, a, n, &out)) {
+      return out;
+    }
+  }
   if (connect(win_sok(fd), a, n) == 0) {
     return 0;
   }
@@ -601,6 +1057,12 @@ static int win_connect(int fd, const struct sockaddr* a, int n) {
 }
 
 static int win_accept(int fd, struct sockaddr* a, int* n) {
+  if (win_on_accept != NULL) {
+    int out = 0;
+    if (win_on_accept(fd, a, n, &out)) {
+      return out;
+    }
+  }
   SOCKET s = accept(win_sok(fd), a, n);
   if (s == INVALID_SOCKET) {
     int e = WSAGetLastError();
@@ -611,6 +1073,12 @@ static int win_accept(int fd, struct sockaddr* a, int* n) {
 }
 
 static ssize_t win_send(int fd, const void* buf, size_t n, int flags) {
+  if (win_on_send != NULL) {
+    ssize_t out = 0;
+    if (win_on_send(fd, buf, n, flags, &out)) {
+      return out;
+    }
+  }
   int r = send(win_sok(fd), (const char*)buf, n > INT_MAX ? INT_MAX : (int)n, flags);
   if (r < 0) {
     int e = WSAGetLastError();
@@ -621,6 +1089,12 @@ static ssize_t win_send(int fd, const void* buf, size_t n, int flags) {
 }
 
 static ssize_t win_recv(int fd, void* buf, size_t n, int flags) {
+  if (win_on_recv != NULL) {
+    ssize_t out = 0;
+    if (win_on_recv(fd, buf, n, flags, &out)) {
+      return out;
+    }
+  }
   int r = recv(win_sok(fd), (char*)buf, n > INT_MAX ? INT_MAX : (int)n, flags);
   if (r < 0) {
     int e = WSAGetLastError();
@@ -632,6 +1106,12 @@ static ssize_t win_recv(int fd, void* buf, size_t n, int flags) {
 
 static ssize_t win_sendto(int fd, const void* buf, size_t n, int flags,
   const struct sockaddr* a, int alen) {
+  if (win_on_sendto != NULL) {
+    ssize_t out = 0;
+    if (win_on_sendto(fd, buf, n, flags, a, alen, &out)) {
+      return out;
+    }
+  }
   int r = sendto(win_sok(fd), (const char*)buf, n > INT_MAX ? INT_MAX : (int)n,
     flags, a, alen);
   if (r < 0) {
@@ -644,6 +1124,12 @@ static ssize_t win_sendto(int fd, const void* buf, size_t n, int flags,
 
 static ssize_t win_recvfrom(int fd, void* buf, size_t n, int flags,
   struct sockaddr* a, int* alen) {
+  if (win_on_recvfrom != NULL) {
+    ssize_t out = 0;
+    if (win_on_recvfrom(fd, buf, n, flags, a, alen, &out)) {
+      return out;
+    }
+  }
   int r = recvfrom(win_sok(fd), (char*)buf, n > INT_MAX ? INT_MAX : (int)n,
     flags, a, alen);
   if (r < 0) {
@@ -690,11 +1176,18 @@ static int fcntl(int fd, int cmd, ...) {
   int arg = va_arg(ap, int);
   va_end(ap);
   if (cmd == F_GETFL) {
-    return fd >= 0 && (unsigned)fd < 65536u ? (int)win_file_flags[fd] : 0;
+    unsigned f = fd >= 0 && (unsigned)fd < 65536u ? win_file_flags[fd] : 0;
+    return (int)(f & ~WIN_FIFO_BIT);
   }
   if (cmd == F_SETFL) {
     if (fd >= 0 && (unsigned)fd < 65536u) {
-      win_file_flags[fd] = (unsigned)arg;
+      unsigned keep = win_file_flags[fd] & WIN_FIFO_BIT;
+      win_file_flags[fd] = (unsigned)arg | keep;
+      if (keep) {
+        DWORD mode = (arg & O_NONBLOCK) ? PIPE_NOWAIT : PIPE_WAIT;
+        SetNamedPipeHandleState((HANDLE)_get_osfhandle(fd), &mode, NULL, NULL);
+        return 0;
+      }
     }
     HANDLE h = (HANDLE)_get_osfhandle(fd);
     if (h == INVALID_HANDLE_VALUE || GetFileType(h) == FILE_TYPE_DISK) {
@@ -845,6 +1338,8 @@ static int pipe(int fds[2]) {
 #define bind       win_bind
 #define listen     win_listen
 #define connect    win_connect
+#define getsockname win_getsockname
+#define dup2       win_dup2
 #define accept     win_accept
 #define send       win_send
 #define recv       win_recv
@@ -888,6 +1383,12 @@ static ssize_t getrandom(void* buf, size_t n, unsigned flags) {
 #define stat  _stat64
 
 static ssize_t pwrite(int fd, const void* buf, size_t n, off_t off) {
+  if (win_on_pwrite != NULL) {
+    ssize_t out = 0;
+    if (win_on_pwrite(fd, buf, n, (long long)off, &out)) {
+      return out;
+    }
+  }
   __int64 cur = _telli64(fd);
   if (cur < 0 || _lseeki64(fd, off, SEEK_SET) < 0) {
     return -1;

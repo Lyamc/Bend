@@ -1,4 +1,3 @@
-# windows: skip
 # File opens must retry EINTR and preserve other errors.
 import Base
 import ./file_binary.bend as T

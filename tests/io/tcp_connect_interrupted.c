@@ -1,8 +1,11 @@
+#ifndef _WIN32
 #include <dlfcn.h>
+#endif
 
 static int interrupted_armed;
 static u32 interrupted_calls;
 
+#ifndef _WIN32
 // A signal that cuts a connect leaves it going on in the background: start
 // the real connect, then answer EINTR as the interrupted call would.
 int connect(int fd, const struct sockaddr* addr, socklen_t len) {
@@ -15,6 +18,23 @@ int connect(int fd, const struct sockaddr* addr, socklen_t len) {
   }
   return r;
 }
+#else
+static int interrupted_connect(int fd, const struct sockaddr* addr, int len,
+  int* out) {
+  int (*saved)(int, const struct sockaddr*, int, int*) = win_on_connect;
+  win_on_connect = NULL;
+  int r = win_connect(fd, addr, len);
+  win_on_connect = saved;
+  if (interrupted_armed && interrupted_calls++ == 0
+    && (r == 0 || errno == EINPROGRESS)) {
+    errno = EINTR;
+    *out = -1;
+    return 1;
+  }
+  *out = r;
+  return 1;
+}
+#endif
 
 Term interrupted_port_run(Env e, Term* f, IoWork* w) {
   int fd = (int)io_hand_v(f[0]);
@@ -29,6 +49,9 @@ Term interrupted_port_run(Env e, Term* f, IoWork* w) {
 Term interrupted_arm_run(Env e, Term* f, IoWork* w) {
   interrupted_armed = 1;
   interrupted_calls = 0;
+#ifdef _WIN32
+  win_on_connect = interrupted_connect;
+#endif
   return f[0];
 }
 
@@ -38,6 +61,9 @@ Term interrupted_check_run(Env e, Term* f, IoWork* w) {
     err_fail("the interrupted connect was issued again");
   }
   interrupted_armed = 0;
+#ifdef _WIN32
+  win_on_connect = NULL;
+#endif
   return f[0];
 }
 

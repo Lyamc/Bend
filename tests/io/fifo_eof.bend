@@ -1,4 +1,3 @@
-# windows: skip
 # io (io_fifo_eof): a computation parked on a FIFO wakes when its writer
 # closes it, and reads the end: after data, with none, and at an fd past
 # FD_SETSIZE. macOS's poll never reports a FIFO's close; its select does

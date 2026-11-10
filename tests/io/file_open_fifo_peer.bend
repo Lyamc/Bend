@@ -1,4 +1,3 @@
-# windows: skip
 # io (file_open_fifo_peer): a File effect that blocks on a peer goes out
 # after what IO.print holds. peer_arm moves stdout onto a pipe read by a
 # shell that waits for a line, echoes it, and only then opens a FIFO and

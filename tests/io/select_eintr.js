@@ -8,8 +8,17 @@
 // open and unwritten: its fd never becomes ready, so a wake is
 // spurious.
 function idle_park(ms, k) {
-  const ffi = require("bun:ffi");
   const sys = io_sys();
+  if (process.platform === "win32") {
+    sys.intr(ms);
+    const p = new Int32Array(2);
+    if (sys.socketpair(p)) {
+      throw new Error("socketpair failed");
+    }
+    io_park_on(p[0], false, k, () => ({ $: CID(Unit) }));
+    return undefined;
+  }
+  const ffi = require("bun:ffi");
   const lib = ffi.dlopen(sys.mac ? "libSystem.dylib" : "libc.so.6", {
     pipe: { args: ["ptr"], returns: "i32" },
     setitimer: { args: ["i32", "ptr", "ptr"], returns: "i32" },

@@ -1,8 +1,11 @@
+#ifndef _WIN32
 #include <dlfcn.h>
+#endif
 
 static int interrupted_fd = -1;
 static u32 interrupted_stage;
 
+#ifndef _WIN32
 // Interrupt the first recv, then let the retry read for real.
 ssize_t recv(int fd, void* data, size_t size, int flags) {
   ssize_t (*real)(int, void*, size_t, int) = dlsym(RTLD_NEXT, "recv");
@@ -12,6 +15,18 @@ ssize_t recv(int fd, void* data, size_t size, int flags) {
   }
   return real(fd, data, size, flags);
 }
+#else
+static int interrupted_recv(int fd, void* data, size_t size, int flags, ssize_t* out) {
+  (void)data;
+  (void)flags;
+  if (fd == interrupted_fd && size > 0 && interrupted_stage++ == 0) {
+    errno = EINTR;
+    *out = -1;
+    return 1;
+  }
+  return 0;
+}
+#endif
 
 Term interrupted_pair_run(Env e, Term* f, IoWork* w) {
   int p[2];
@@ -24,6 +39,9 @@ Term interrupted_pair_run(Env e, Term* f, IoWork* w) {
 Term interrupted_arm_run(Env e, Term* f, IoWork* w) {
   interrupted_fd = (int)io_hand_v(f[0]);
   interrupted_stage = 0;
+#ifdef _WIN32
+  win_on_recv = interrupted_recv;
+#endif
   return f[0];
 }
 
@@ -32,6 +50,9 @@ Term interrupted_check_run(Env e, Term* f, IoWork* w) {
     err_fail("the recv did not retry after its interruption");
   }
   interrupted_fd = -1;
+#ifdef _WIN32
+  win_on_recv = NULL;
+#endif
   return f[0];
 }
 

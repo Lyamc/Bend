@@ -1,4 +1,7 @@
 #include <fcntl.h>
+#ifndef SIGWINCH
+#define SIGWINCH 28
+#endif
 
 // A no-op handler for SIGWINCH, installed without SA_RESTART, and a
 // thread that sends it to the loop's thread ms later. Then the

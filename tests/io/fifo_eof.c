@@ -1,6 +1,29 @@
 #include <fcntl.h>
+#ifndef _WIN32
 #include <sys/resource.h>
+#endif
 #include <sys/stat.h>
+
+#ifdef _WIN32
+struct fifo_job {
+  int wr;
+  int ack;
+  u32 len;
+};
+
+static DWORD WINAPI fifo_writer(void* raw) {
+  struct fifo_job* j = (struct fifo_job*)raw;
+  char c;
+  for (u32 i = 0; i < j->len; i += 1) {
+    write(j->wr, "x", 1);
+  }
+  read(j->ack, &c, 1);
+  close(j->wr);
+  close(j->ack);
+  free(j);
+  return 0;
+}
+#endif
 
 // A child writes len bytes into a FIFO, then waits on an ack pipe and
 // closes the FIFO only once the reader has drained it and parks again, so
@@ -35,16 +58,29 @@ Term fifo_drain_run(Env e, Term* f, IoWork* w) {
   int wr = open(path, O_WRONLY | O_NONBLOCK);
   unlink(path);
   if (hi != 0) {
+#ifndef _WIN32
     struct rlimit r;
     getrlimit(RLIMIT_NOFILE, &r);
     r.rlim_cur = r.rlim_cur > (rlim_t)hi ? r.rlim_cur : (rlim_t)hi + 1;
     setrlimit(RLIMIT_NOFILE, &r);
+#endif
     dup2(rd, hi);
     close(rd);
     rd = hi;
   }
   int ack[2];
   pipe(ack);
+#ifdef _WIN32
+  struct fifo_job* j = (struct fifo_job*)malloc(sizeof *j);
+  j->wr = dup(wr);
+  if (j->wr >= 0 && (unsigned)j->wr < 65536u) {
+    win_file_flags[j->wr] = win_file_flags[wr];
+  }
+  j->ack = ack[0];
+  j->len = len;
+  CreateThread(NULL, 0, fifo_writer, j, 0, NULL);
+  close(wr);
+#else
   if (fork() == 0) {
     char c;
     close(ack[1]);
@@ -56,6 +92,7 @@ Term fifo_drain_run(Env e, Term* f, IoWork* w) {
   }
   close(ack[0]);
   close(wr);
+#endif
   w->hand = rd;
   w->made = len;
   w->code = (u32)ack[1];

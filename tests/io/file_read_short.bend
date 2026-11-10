@@ -1,4 +1,3 @@
-# windows: skip
 # io (io_file_read_short): File.read fills its buffer instead of answering
 # the first read(2). A FIFO writer sends sixteen bytes one at a time; a
 # read of sixteen must answer sixteen, not the first one.
