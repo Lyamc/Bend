@@ -1,3 +1,4 @@
+# windows: skip
 # EINTR before and after a short send must preserve the unsent offset.
 import Base
 import ./tcp_bytes.bend as TCPTest

@@ -13,8 +13,16 @@
 #elif defined(__linux__)
 #include <alsa/asoundlib.h>
 #elif defined(_WIN32)
+#pragma push_macro("FAR")
+#pragma push_macro("NEAR")
+#undef FAR
+#undef NEAR
+#define FAR
+#define NEAR
 #include <mmsystem.h>
 #include <mmreg.h>
+#pragma pop_macro("NEAR")
+#pragma pop_macro("FAR")
 #endif
 
 typedef struct {

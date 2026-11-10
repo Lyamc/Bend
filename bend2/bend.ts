@@ -911,6 +911,20 @@ function path_fwd(p: string): string {
   return p.replace(/\\/g, "/");
 }
 
+function path_drive(p: string): boolean {
+  return /^[A-Za-z]:/.test(p);
+}
+
+function path_resolve(dir: string, rel: string): string {
+  return path_drive(dir) || path_drive(rel)
+    ? path_fwd(path.win32.resolve(dir, rel)) : path.posix.resolve(dir, rel);
+}
+
+function path_rel(from: string, to: string): string {
+  return path_fwd(path_drive(from) || path_drive(to)
+    ? path.win32.relative(from, to) : path.posix.relative(from, to));
+}
+
 export const BEND_DIR = path_fwd(import.meta.url.startsWith("file:///$bunfs/")
   ? path.join(path.dirname(fs.realpathSync(process.execPath)), "..", "bend2")
   : url.fileURLToPath(new URL(".", import.meta.url)));
@@ -981,7 +995,8 @@ export async function book_load(book: Book, file: string, ns: string, seen: Map<
   seen.set(real, null);
   const dir   = real.slice(0, real.lastIndexOf("/") + 1);
   const top   = root ?? dir;
-  const text  = fs.readFileSync(real, "utf8");
+  const text  = fs.readFileSync(real, "utf8").replace(/^\uFEFF/, "")
+    .replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   const lines = text.split("\n");
   const body  = lines.slice();
   const al    : Record<Name, Name> = Object.create(null);
@@ -1020,16 +1035,16 @@ export async function book_load(book: Book, file: string, ns: string, seen: Map<
     if (!ok(as.replace(/^\.\//, "").slice(0, -5), hub(as))) {
       throw bad();
     }
-    const got = await book_file(book, hub(as) ? BEND_LIB + "/" + rel : path.posix.resolve(dir, rel), sp);
+    const got = await book_file(book, hub(as) ? BEND_LIB + "/" + rel : path_resolve(dir, rel), sp);
     const lib = fs.existsSync(BEND_LIB) ? path_fwd(fs.realpathSync(BEND_LIB)) + "/" : "\0";
     const in_lib = got.startsWith(lib);
     const sub = (in_lib ? got.slice(lib.length)
-      : path.posix.relative(top, got)).replace(/\.bend$/, "");
+      : path_rel(top, got)).replace(/\.bend$/, "");
     if ((in_lib && !hub(sub)) || (hub(ns) && !in_lib)) {
       throw Err(book, ctx_nil(), "an import on its side of the hub (a hub file imports only hub files, and a local path stays out of the hub's store)", "'" + m[1] + "'", sp);
     }
     if (!ok(sub, in_lib)) {
-      throw bad(" (resolves to '" + (in_lib ? got.slice(lib.length) : path.posix.relative(dir, got)) + "')");
+      throw bad(" (resolves to '" + (in_lib ? got.slice(lib.length) : path_rel(dir, got)) + "')");
     }
     al[m[2]] = sub;
     await book_load(book, got, sub, seen, sp, top);
@@ -1533,9 +1548,16 @@ export function err_show(err: Err): string {
     const end = Math.min(lns.length, at + 1);
     const num = String(end).length;
     const lft = pre[at - 1];
-    const car = " ".repeat(num) + " | " + lft.replace(/[^\t]/g, " ") + "^".repeat(Math.max(1, Math.min(err.spn.end - err.spn.beg, lns[at - 1].length - lft.length)));
+    const bare = (s: string) => s.replace(/\r/g, "");
+    const line = bare(lns[at - 1]);
+    const left = bare(lft);
+    const span = err.spn.end - err.spn.beg
+      - (err.spn.file.str.slice(err.spn.beg, err.spn.end).split("\r").length - 1);
+    const room = line.length - left.length;
+    const car = " ".repeat(num) + " | " + left.replace(/[^\t]/g, " ")
+      + "^".repeat(Math.max(1, Math.min(span, room)));
     spn = "\n" + lns.slice(beg - 1, end).map((l, j) =>
-      String(beg + j).padStart(num) + (beg + j === at ? ">| " + l + "\n" + car : " | " + l)).join("\n");
+      String(beg + j).padStart(num) + (beg + j === at ? ">| " + bare(l) + "\n" + car : " | " + bare(l))).join("\n");
   }
   const loc  = def === "" && spn === "" ? "" : "\nLocation:" + def + spn;
   const nte = [err.nte, err.spn && err_lost_type(err)].filter((n) => n).map((n) => "\n" + n).join("");

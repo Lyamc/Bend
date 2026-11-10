@@ -31,6 +31,11 @@ $mainEsc = $main.Replace("%", "%%")
 
 Write-Host "Installed $cmd"
 Write-Host "Make sure $binDir is on PATH, then run: bend --version"
+if ($env:CUDA_PATH) {
+  $cudaBin = Join-Path $env:CUDA_PATH "bin\x64"
+  Write-Host "CUDA 13.x: put $cudaBin on PATH so nvrtc64_130_0.dll loads."
+  Write-Host "A GPU build delay-loads that DLL from CUDA_PATH when the directory exists at link time."
+}
 try {
   & bun $main --version
 } catch {

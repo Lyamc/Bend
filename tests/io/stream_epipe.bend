@@ -1,3 +1,4 @@
+# windows: skip
 # io (io_stream_epipe): a write to stdout or stderr whose reader has
 # left (EPIPE) ends the program quietly by SIGPIPE, status 141 in a
 # shell, as yes | head does (#1467): it printed "bend: a short write

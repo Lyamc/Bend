@@ -1,3 +1,4 @@
+# windows: skip
 # Process.run runs no shell: an executable with no #! line is refused with
 # ENOEXEC (8), as Linux does. macOS's posix_spawnp would run it with /bin/sh.
 # A name with no slash is searched in PATH: found, it runs; missing, ENOENT.

@@ -1,3 +1,4 @@
+# windows: skip
 # EINTR on a connect must wait for the connect to finish, not fail it.
 import Base
 import ./tcp_bytes.bend as TCPTest

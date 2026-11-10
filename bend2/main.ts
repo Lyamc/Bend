@@ -309,6 +309,11 @@ async function cli_file(args: string[]): Promise<void> {
       return await cli_checkup(file);
     }
     const seen = new Map<string, string | null>();
+    if (process.platform === "win32" && outs.length === 0 && !checkup
+      && /(^|\n)# windows: skip(?:\r?\n|$)/.test(fs.readFileSync(file, "utf8"))) {
+      cli_say(2, "bend: skipped on windows: " + file + "\n");
+      return;
+    }
     const book = await book_read(file, undefined, seen);
     if (only || verdict) {
       process.exitCode = cli_verdict(book, verdict);
@@ -519,7 +524,13 @@ function cli_build(bin: string, file: string): void {
   const gpu = mac ? ["-DBEND_METAL=1", ...cpu]
     : ["-DBEND_CUDA=1", "-I" + path.join(cuda, "include"),
       "-L" + path.join(cuda, win ? "lib/x64" : "lib64"),
-      "-L" + path.join(cuda, "lib"), ...cpu, "-lcuda", "-lnvrtc"];
+      "-L" + path.join(cuda, "lib"), ...cpu, "-lcuda", "-lnvrtc",
+      ...(win ? (() => {
+        const bin = path.join(cuda, "bin", "x64");
+        const dll = fs.existsSync(bin) ? fs.readdirSync(bin)
+          .filter((n) => /^nvrtc64_\d+_\d+\.dll$/i.test(n)).sort().at(-1) : undefined;
+        return dll ? ["-Wl,/DELAYLOAD:" + dll, "delayimp.lib"] : [];
+      })() : [])];
   const steps: [string, string[]][] = bangs
     ? [[cc, gpu], [path.resolve(out), ["+RTS", "--gpu-build"]]] : [[cc, cpu]];
   for (const [cmd, args] of steps) {

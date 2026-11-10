@@ -1,3 +1,4 @@
+# windows: skip
 # Two overlapping subprocesses must not share pipes or strand each other's
 # stdin EOF; their captured output belongs to the matching IO.fork action.
 import Base

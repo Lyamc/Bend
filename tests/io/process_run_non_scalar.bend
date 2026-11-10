@@ -1,3 +1,4 @@
+# windows: skip
 # io (io_process_run_non_scalar): a String that crosses into a child
 # process, as argv inside a List or as stdin, writes a non-scalar Char
 # as U+FFFD like IO.print does (#1080); before, JS passed its inner

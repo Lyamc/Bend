@@ -402,6 +402,29 @@ static DWORD WINAPI process_write(LPVOID arg) {
   return 0;
 }
 
+// A leading slash is a POSIX path. CreateProcess turns it into a
+// drive-root or UNC name and can block on the network, so it is ENOENT.
+static int process_local(const char* s) {
+  return s != NULL && s[0] != 0 && s[0] != '/'
+    && !(s[0] == '\\' && s[1] == '\\');
+}
+
+static void process_drain(ProcessCall* p, HANDLE rd, bool error) {
+  for (;;) {
+    char buf[8192];
+    DWORD avail = 0;
+    DWORD n = 0;
+    if (!PeekNamedPipe(rd, NULL, 0, NULL, &avail, NULL) || avail == 0) {
+      return;
+    }
+    if (!ReadFile(rd, buf, avail > sizeof buf ? sizeof buf : avail, &n, NULL)
+      || n == 0) {
+      return;
+    }
+    process_append(p, error, buf, n);
+  }
+}
+
 static void process_call(IoWork* w) {
   ProcessCall* p = (ProcessCall*)w->data;
   HANDLE in[2] = { NULL, NULL };
@@ -411,14 +434,19 @@ static void process_call(IoWork* w) {
   PROCESS_INFORMATION pi;
   STARTUPINFOA si;
   ProcessWrite wr = { NULL, NULL, 0 };
-  u64 deadline = 0;
   bool open_out = true;
   bool open_err = true;
+  char* cmd = NULL;
   memset(&pi, 0, sizeof pi);
   memset(&si, 0, sizeof si);
+  if (!process_local(p->argv[0])) {
+    p->code = ENOENT;
+    return;
+  }
+  ULONGLONG deadline = GetTickCount64() + (p->timeout == 0 ? 0 : p->timeout);
   u64 cap = 64;
   u64 len = 0;
-  char* cmd = io_mem(malloc(cap));
+  cmd = io_mem(malloc(cap));
   SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
   for (u32 i = 0; i < p->argc; i += 1) {
     if (i != 0) {
@@ -433,8 +461,11 @@ static void process_call(IoWork* w) {
   cmd[len] = 0;
   if (len >= 32768) {
     p->code = E2BIG;
-    free(cmd);
-    return;
+    goto done;
+  }
+  if (GetTickCount64() >= deadline) {
+    p->code = 110;
+    goto done;
   }
   if (!CreatePipe(&in[0], &in[1], &sa, 0)
     || !CreatePipe(&out[0], &out[1], &sa, 0)
@@ -473,20 +504,17 @@ static void process_call(IoWork* w) {
       p->code = EIO;
     }
   }
-  deadline = io_tick() + (u64)p->timeout * 1000000ull;
-  while (p->code == 0 && (open_out || open_err
-    || WaitForSingleObject(pi.hProcess, 0) == WAIT_TIMEOUT)) {
-    if (io_tick() >= deadline) {
-      p->code = ETIMEDOUT;
-      break;
-    }
+  while (p->code == 0 && GetTickCount64() < deadline && (open_out || open_err
+    || (pi.hProcess != NULL && WaitForSingleObject(pi.hProcess, 0) == WAIT_TIMEOUT))) {
     HANDLE rd[2] = { out[0], err[0] };
     bool* live[2] = { &open_out, &open_err };
     bool got = false;
     for (int i = 0; i < 2; i += 1) {
-      if (!*live[i]) {
+      if (!*live[i] || rd[i] == NULL) {
         continue;
       }
+      char buf[8192];
+      DWORD n = 0;
       DWORD avail = 0;
       if (!PeekNamedPipe(rd[i], NULL, 0, NULL, &avail, NULL)) {
         *live[i] = false;
@@ -495,37 +523,40 @@ static void process_call(IoWork* w) {
       if (avail == 0) {
         continue;
       }
-      char buf[8192];
-      DWORD n = 0;
-      if (!ReadFile(rd[i], buf, avail > sizeof buf ? sizeof buf : avail, &n,
-        NULL)) {
-        *live[i] = false;
-        continue;
-      }
-      if (n == 0) {
+      if (!ReadFile(rd[i], buf, avail > sizeof buf ? sizeof buf : avail, &n, NULL)
+        || n == 0) {
         *live[i] = false;
         continue;
       }
       process_append(p, i == 1, buf, n);
       got = true;
     }
-    if (!got) {
-      WaitForSingleObject(pi.hProcess, 10);
+    if (!got && pi.hProcess != NULL) {
+      ULONGLONG now = GetTickCount64();
+      DWORD slice = now >= deadline ? 0
+        : (DWORD)((deadline - now) > 20 ? 20 : deadline - now);
+      WaitForSingleObject(pi.hProcess, slice);
     }
   }
-  if (p->code != 0 && pi.hProcess != NULL) {
-    TerminateProcess(pi.hProcess, 1);
+  if (open_out && out[0] != NULL) {
+    process_drain(p, out[0], false);
   }
-  if (thread != NULL) {
-    WaitForSingleObject(thread, 2000);
-    CloseHandle(thread);
-    thread = NULL;
+  if (open_err && err[0] != NULL) {
+    process_drain(p, err[0], true);
   }
-  if (p->code == 0) {
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    DWORD status = 1;
-    GetExitCodeProcess(pi.hProcess, &status);
-    p->status = status;
+  if (pi.hProcess != NULL) {
+    DWORD status = STILL_ACTIVE;
+    BOOL ran = GetExitCodeProcess(pi.hProcess, &status);
+    if (ran && status != STILL_ACTIVE) {
+      if (p->code == 0) {
+        p->status = status;
+      }
+    } else if (p->code == 0) {
+      p->code = 110;
+      TerminateProcess(pi.hProcess, 1);
+    }
+  } else if (p->code == 0) {
+    p->code = EIO;
   }
 done:
   free(cmd);

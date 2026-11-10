@@ -1,3 +1,4 @@
+# windows: skip
 # EINTR on an accept must retry it, not fail the accept.
 import Base
 

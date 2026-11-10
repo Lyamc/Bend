@@ -3,6 +3,14 @@ Term title_run(Env e, Term* f, IoWork* w) {
   NSWindow* win = (__bridge NSWindow*)(void*)(uintptr_t)io_hand_v(f[0]);
   const char* text = win.title.UTF8String;
   return io_tup(e, f[0], io_str(e, text, strlen(text)));
+#elif defined(_WIN32)
+  BendWin* win = (BendWin*)(uintptr_t)io_hand_v(f[0]);
+  wchar_t wide[1024];
+  int n = GetWindowTextW(win->hwnd, wide, 1024);
+  char utf[4096];
+  int k = n > 0 ? WideCharToMultiByte(CP_UTF8, 0, wide, n, utf, (int)sizeof utf,
+    NULL, NULL) : 0;
+  return io_tup(e, f[0], io_str(e, k > 0 ? utf : "", k > 0 ? (u64)k : 0));
 #elif defined(__linux__)
   BendWin* win = (BendWin*)(uintptr_t)io_hand_v(f[0]);
   Atom           type;

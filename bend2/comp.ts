@@ -5634,7 +5634,11 @@ static Term io_box(Env e, u64 cid, Term v) {
 }
 
 static Term io_err(Env e, u32 code, const char* text) {
+#ifdef _WIN32
+  const char* s = text != NULL ? text : win_strerror((int)code);
+#else
   const char* s = text != NULL ? text : strerror((int)code);
+#endif
   return io_tup(e, code, io_str(e, s, strlen(s)));
 }
 
@@ -6275,12 +6279,14 @@ function io_sys() {
 
 // Without bun:ffi, errors use bare errno.
 function io_fail(code, ...rest) {
-  let text = "errno " + code;
+  const map = io_sys().posix;
+  const n = map ? map(code) : code >>> 0;
+  let text = "errno " + n;
   try {
-    text = String(io_sys().strerror(code));
+    text = String(io_sys().strerror(n));
   } catch (_) {
   }
-  return { $: "Fail", error: io_tup(io_tup(code >>> 0, text), ...rest) };
+  return { $: "Fail", error: io_tup(io_tup(n >>> 0, text), ...rest) };
 }
 
 function io_done(value) {

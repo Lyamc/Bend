@@ -7,6 +7,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #define _CRT_SECURE_NO_WARNINGS
+#define _CRT_NONSTDC_NO_DEPRECATE
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -274,15 +275,39 @@ static void win_init(void) {
 }
 
 static int win_wsa_errno(void) {
-  int e = WSAGetLastError();
-  switch (e) {
-    case WSAEWOULDBLOCK: return EAGAIN;
-    case WSAEINPROGRESS: return EINPROGRESS;
-    case WSAECONNRESET:  return WSAECONNRESET;
-    case WSAECONNREFUSED: return WSAECONNREFUSED;
-    case WSAETIMEDOUT:   return WSAETIMEDOUT;
-    case WSAEADDRINUSE:  return WSAEADDRINUSE;
-    default: return e ? e : EINVAL;
+  switch (WSAGetLastError()) {
+    case WSAEWOULDBLOCK: return 11;
+    case WSAEINPROGRESS: return 115;
+    case WSAEALREADY: return 114;
+    case WSAENOTSOCK: return 88;
+    case WSAEDESTADDRREQ: return 89;
+    case WSAEMSGSIZE: return 90;
+    case WSAEPROTOTYPE: return 91;
+    case WSAENOPROTOOPT: return 92;
+    case WSAEPROTONOSUPPORT: return 93;
+    case WSAESOCKTNOSUPPORT: return 94;
+    case WSAEOPNOTSUPP: return 95;
+    case WSAEPFNOSUPPORT: return 96;
+    case WSAEAFNOSUPPORT: return 97;
+    case WSAEADDRINUSE: return 98;
+    case WSAEADDRNOTAVAIL: return 99;
+    case WSAENETDOWN: return 100;
+    case WSAENETUNREACH: return 101;
+    case WSAECONNABORTED: return 103;
+    case WSAECONNRESET: return 104;
+    case WSAENOBUFS: return 105;
+    case WSAEISCONN: return 106;
+    case WSAENOTCONN: return 107;
+    case WSAESHUTDOWN: return 108;
+    case WSAETIMEDOUT: return 110;
+    case WSAECONNREFUSED: return 111;
+    case WSAEHOSTDOWN: return 112;
+    case WSAEHOSTUNREACH: return 113;
+    case WSAEINVAL: return 22;
+    case WSAEACCES: return 13;
+    case WSAEFAULT: return 14;
+    case WSAEMFILE: return 24;
+    default: return 5;
   }
 }
 
@@ -327,6 +352,8 @@ static int munmap(void* p, size_t n) {
 }
 
 static SOCKET win_sok(int fd);
+static ssize_t win_send(int fd, const void* buf, size_t n, int flags);
+static ssize_t win_recv(int fd, void* buf, size_t n, int flags);
 
 #ifdef select
 #undef select
@@ -503,14 +530,26 @@ static int win_close(int fd) {
   return _close(fd);
 }
 
+static int win_is_sock(int fd) {
+  SOCKET s = (SOCKET)_get_osfhandle(fd);
+  int t = 0;
+  int n = sizeof t;
+  return s != (SOCKET)INVALID_HANDLE_VALUE && s != INVALID_SOCKET
+    && getsockopt(s, SOL_SOCKET, SO_TYPE, (char*)&t, &n) == 0;
+}
+
 static ssize_t win_read(int fd, void* buf, size_t n) {
-  int r = _read(fd, buf, n > INT_MAX ? INT_MAX : (unsigned)n);
-  return r;
+  if (win_is_sock(fd)) {
+    return win_recv(fd, buf, n, 0);
+  }
+  return _read(fd, buf, n > INT_MAX ? INT_MAX : (unsigned)n);
 }
 
 static ssize_t win_write(int fd, const void* buf, size_t n) {
-  int r = _write(fd, buf, n > INT_MAX ? INT_MAX : (unsigned)n);
-  return r;
+  if (win_is_sock(fd)) {
+    return win_send(fd, buf, n, 0);
+  }
+  return _write(fd, buf, n > INT_MAX ? INT_MAX : (unsigned)n);
 }
 
 static SOCKET win_sok(int fd) {
@@ -811,6 +850,8 @@ static int pipe(int fds[2]) {
 #define setsockopt win_setsockopt
 #define getsockopt win_getsockopt
 #define select     win_select
+#define read       win_read
+#define write      win_write
 #ifdef off_t
 #undef off_t
 #endif
@@ -839,8 +880,6 @@ static ssize_t getrandom(void* buf, size_t n, unsigned flags) {
 
 #define close      win_close
 #define open       win_open
-#define read       win_read
-#define write      win_write
 
 #define fstat _fstat64
 #define stat  _stat64
@@ -874,5 +913,62 @@ static int ftrylockfile(FILE* f) {
 #ifdef FAR
 #undef FAR
 #endif
+
+#if !defined(__MINGW32__)
+#define strdup _strdup
+#endif
+
+static const char* win_strerror(int e) {
+  switch (e) {
+    case 1: return "Operation not permitted";
+    case 2: return "No such file or directory";
+    case 5: return "Input/output error";
+    case 11: return "Resource temporarily unavailable";
+    case 13: return "Permission denied";
+    case 17: return "File exists";
+    case 20: return "Not a directory";
+    case 21: return "Is a directory";
+    case 22: return "Invalid argument";
+    case 27: return "File too large";
+    case 28: return "No space left on device";
+    case 32: return "Broken pipe";
+    case 98: return "Address already in use";
+    case 110: return "Connection timed out";
+    case 111: return "Connection refused";
+    default: return "Unknown error";
+  }
+}
+
+static void cuda_load(void) {
+  const char* home = getenv("CUDA_PATH");
+  if (home == NULL) {
+    home = getenv("CUDA_HOME");
+  }
+  if (home == NULL) {
+    return;
+  }
+  char pat[MAX_PATH];
+  snprintf(pat, sizeof pat, "%s\\bin\\x64\\nvrtc64_*.dll", home);
+  WIN32_FIND_DATAA fd;
+  HANDLE h = FindFirstFileA(pat, &fd);
+  if (h == INVALID_HANDLE_VALUE) {
+    return;
+  }
+  char best[MAX_PATH];
+  best[0] = 0;
+  do {
+    if (strcmp(fd.cFileName, best) > 0) {
+      snprintf(best, sizeof best, "%s", fd.cFileName);
+    }
+  } while (FindNextFileA(h, &fd));
+  FindClose(h);
+  char full[MAX_PATH];
+  snprintf(full, sizeof full, "%s\\bin\\x64\\%s", home, best);
+  LoadLibraryA(full);
+}
+
+static void __attribute__((constructor)) cuda_load_use(void) {
+  cuda_load();
+}
 
 #endif

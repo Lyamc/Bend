@@ -4,3 +4,11 @@
 *.bend linguist-language=Python linguist-detectable=false
 bench/checker/** linguist-vendored
 *.lean linguist-detectable=false
+
+# A core.autocrlf=true checkout rewrites these to CRLF and the #| fixtures,
+# which are compared as text, stop matching. Keep them LF on every OS.
+*.bend text eol=lf
+*.ts text eol=lf
+*.c text eol=lf
+*.js text eol=lf
+*.h text eol=lf

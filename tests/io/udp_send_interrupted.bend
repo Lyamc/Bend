@@ -1,3 +1,4 @@
+# windows: skip
 # An interrupted send retries the same whole datagram in every send API.
 import Base
 import ./udp_bytes.bend as UDPTest

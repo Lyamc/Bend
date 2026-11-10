@@ -1,3 +1,4 @@
+# windows: skip
 # An interrupted first read of File.read_line must retry and answer the
 # line, without looking at a byte before the buffer.
 import Base

@@ -62,6 +62,15 @@ bun bend2/main.ts demos/io_hello_world/main.bend
   grow the C stack. GPU `!` still needs clang 19+ and CUDA 12+.
 - CUDA includes/libs are taken from `%CUDA_PATH%` / `%CUDA_HOME%`
   (`include`, `lib\x64`), not only `/usr/local/cuda`.
+- CUDA 13.x ships `nvrtc64_130_0.dll` in `%CUDA_PATH%\bin\x64`, which is not
+  on PATH by default. A GPU link delay-loads whichever `nvrtc64_*.dll` is in
+  that directory, and the runtime `LoadLibrary`s it from there before the
+  first nvrtc call. Put that directory on PATH as well if something else
+  loads nvrtc before `main`.
+
+Tests that need POSIX only (a `/bin` program, a FIFO, `EINTR`, or
+`libc.so.6`) start with `# windows: skip`. On Windows, `bend file.bend`
+prints `bend: skipped on windows: ...` and does not run them.
 
 ## Updating from upstream
 

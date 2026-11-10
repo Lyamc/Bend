@@ -14,10 +14,6 @@ function io_sys_win(ffi) {
     + " connect:Upu>i accept:Upp>U send:UpUi>i recv:UpUi>i sendto:UpUipu>i"
     + " recvfrom:UpUipp>i closesocket:U>i ioctlsocket:Uup>i"
     + " setsockopt:Uiipu>i getsockopt:Uiipp>i WSAPoll:pui>i"));
-  const k32 = ffi.dlopen("kernel32.dll", {
-    FormatMessageA: { args: ["u32", "ptr", "u32", "u32", "ptr", "u32", "ptr"],
-      returns: "u32" },
-  });
   const wsa = new Uint8Array(512);
   ws.symbols.WSAStartup(0x0202, ffi.ptr(wsa));
   const tab = [];
@@ -44,11 +40,37 @@ function io_sys_win(ffi) {
     mac: false,
     ptr: ffi.ptr,
     errno: () => last.n,
+    posix: (code) => {
+      let n = code | 0;
+      if (n < 0) n = -n;
+      const uv = { 4093: 7, 4092: 13, 4091: 98, 4090: 99, 4089: 97, 4088: 11,
+        4084: 114, 4083: 9, 4082: 16, 4081: 125, 4079: 103, 4078: 111, 4077: 104,
+        4076: 89, 4075: 17, 4074: 14, 4073: 113, 4072: 4, 4071: 22, 4070: 5,
+        4069: 106, 4068: 21, 4067: 40, 4066: 24, 4065: 90, 4064: 36, 4063: 100,
+        4062: 101, 4061: 23, 4060: 105, 4059: 19, 4058: 2, 4057: 12, 4055: 28,
+        4054: 38, 4053: 107, 4052: 20, 4051: 39, 4050: 88, 4049: 95, 4048: 1,
+        4047: 32, 4046: 71, 4045: 93, 4044: 91, 4043: 30, 4042: 108, 4041: 29,
+        4040: 3, 4039: 110, 4038: 26, 4037: 18, 4036: 27, 4035: 92, 4034: 34,
+        4033: 6, 4032: 31, 4031: 112, 4030: 121, 4029: 25, 4027: 84, 4026: 75,
+        4025: 94 };
+      const wsa = { 10013: 13, 10014: 14, 10022: 22, 10024: 24, 10035: 11,
+        10036: 115, 10037: 114, 10038: 88, 10039: 89, 10040: 90, 10041: 91,
+        10042: 92, 10043: 93, 10044: 94, 10045: 95, 10047: 97, 10048: 98,
+        10049: 99, 10050: 100, 10051: 101, 10053: 103, 10054: 104, 10055: 105,
+        10056: 106, 10057: 107, 10058: 108, 10060: 110, 10061: 111,
+        10064: 112, 10065: 113 };
+      return uv[n] ?? wsa[n] ?? n;
+    },
     strerror: (code) => {
-      const buf = new Uint8Array(256);
-      const n = k32.symbols.FormatMessageA(0x1000, null, code, 0, ffi.ptr(buf),
-        255, null);
-      return n > 0 ? io_text(buf, n).trim() : "error " + code;
+      const text = { 1: "Operation not permitted", 2: "No such file or directory",
+        4: "Interrupted system call", 5: "Input/output error",
+        11: "Resource temporarily unavailable", 13: "Permission denied",
+        17: "File exists", 20: "Not a directory", 21: "Is a directory",
+        22: "Invalid argument", 27: "File too large", 28: "No space left on device",
+        32: "Broken pipe", 98: "Address already in use",
+        110: "Connection timed out", 111: "Connection refused" };
+      const n = (code | 0) < 0 ? -(code | 0) : code | 0;
+      return text[n] ?? ("error " + n);
     },
     socket: (d, t, p) => {
       const fd = put(ws.symbols.socket(d, t, p));

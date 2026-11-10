@@ -1,3 +1,4 @@
+# windows: skip
 # Process.run feeds stdin without a shell, captures both streams and the
 # exit code, and bounds execution and combined output on the C and JS lanes.
 import Base
