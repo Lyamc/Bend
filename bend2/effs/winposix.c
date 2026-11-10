@@ -648,6 +648,9 @@ static ssize_t win_recvfrom(int fd, void* buf, size_t n, int flags,
     flags, a, alen);
   if (r < 0) {
     int e = WSAGetLastError();
+    if (e == WSAEMSGSIZE) {
+      return n > INT_MAX ? INT_MAX : (int)n;
+    }
     errno = e == WSAEWOULDBLOCK ? EAGAIN : win_wsa_errno();
     return -1;
   }
@@ -923,6 +926,7 @@ static const char* win_strerror(int e) {
     case 1: return "Operation not permitted";
     case 2: return "No such file or directory";
     case 5: return "Input/output error";
+    case 9: return "Bad file descriptor";
     case 11: return "Resource temporarily unavailable";
     case 13: return "Permission denied";
     case 17: return "File exists";

@@ -69,6 +69,8 @@ function bundle_inline() {
     // character references in the page name must not change that name.
     for (const page of ['quote"name.html', 'entity&quot;name.html',
       'percent%22 name.html', 'unicode-λ.html']) {
+      // Windows file names cannot contain a quote. The other spellings still run.
+      if (process.platform === "win32" && page.includes('"')) continue;
       put(page, '<script type="module">import M from "./m.bend";'
         + ' console.log(M.main());</script>\n');
       if (build(page).status !== 0) return 9;
@@ -81,9 +83,11 @@ function bundle_inline() {
       const result = run(path.resolve(out, src));
       if (result.status !== 0 || result.stdout.trim() !== "42") return 10;
     }
-    put('bad"name.html', '<script type="module">\nconst x = ;\n</script>\n');
-    const quoted = build('bad"name.html');
-    if (quoted.status !== 1 || !quoted.stderr.includes('bad"name.html:2:11')) return 11;
+    if (process.platform !== "win32") {
+      put('bad"name.html', '<script type="module">\nconst x = ;\n</script>\n');
+      const quoted = build('bad"name.html');
+      if (quoted.status !== 1 || !quoted.stderr.includes('bad"name.html:2:11')) return 11;
+    }
     put(".external.html.bend-inline-99.js", "const broken = ;\n");
     put("external.html", '<script type="module" src="./.external.html.bend-inline-99.js"></script>\n');
     const external = build("external.html");

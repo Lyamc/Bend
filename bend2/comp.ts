@@ -6279,11 +6279,14 @@ function io_sys() {
 
 // Without bun:ffi, errors use bare errno.
 function io_fail(code, ...rest) {
-  const map = io_sys().posix;
-  const n = map ? map(code) : code >>> 0;
+  let n = code >>> 0;
   let text = "errno " + n;
   try {
-    text = String(io_sys().strerror(n));
+    const sys = io_sys();
+    if (sys.posix) {
+      n = sys.posix(code) >>> 0;
+    }
+    text = String(sys.strerror(n));
   } catch (_) {
   }
   return { $: "Fail", error: io_tup(io_tup(n >>> 0, text), ...rest) };

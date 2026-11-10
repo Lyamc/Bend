@@ -2,6 +2,10 @@
 // ====
 
 function file_close(file) {
+  if (globalThis.BEND_ZERO?.has(file)) {
+    globalThis.BEND_ZERO.delete(file);
+    return { $: CID(Unit) };
+  }
   const fs = require("fs");
   try {
     fs.closeSync(file);

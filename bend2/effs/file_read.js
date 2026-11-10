@@ -26,6 +26,15 @@ function file_read_room(fs, file, len, line, offset) {
 }
 
 function file_read_with(file, max, offset, pack, line = false) {
+  if (globalThis.BEND_ZERO?.has(file)) {
+    const n = Math.min(Math.max(Number(max) || 0, 0), 2147483647);
+    return io_tup(file, io_done(pack(new Uint8Array(n), n)));
+  }
+  // File.open("a") is write-only. Linux read(2) answers EBADF; Windows
+  // reports access denied, which is not what the fixtures name.
+  if (io_file_append.has(file)) {
+    return io_tup(file, io_fail(9));
+  }
   const fs = require("fs");
   const len = Math.min(max, 2147483647);
   let b = new Uint8Array(file_read_room(fs, file, len, line, offset));

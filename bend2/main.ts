@@ -529,7 +529,13 @@ function cli_build(bin: string, file: string): void {
         const bin = path.join(cuda, "bin", "x64");
         const dll = fs.existsSync(bin) ? fs.readdirSync(bin)
           .filter((n) => /^nvrtc64_\d+_\d+\.dll$/i.test(n)).sort().at(-1) : undefined;
-        return dll ? ["-Wl,/DELAYLOAD:" + dll, "delayimp.lib"] : [];
+        if (!dll) return [];
+        const roots = (process.env.LIB ?? "").split(";").concat(
+          process.env.VCToolsInstallDir
+            ? [path.join(process.env.VCToolsInstallDir, "lib", "x64")] : []);
+        const full = roots.map((d) => path.join(d, "delayimp.lib"))
+          .find((p) => p !== "delayimp.lib" && fs.existsSync(p));
+        return ["-Wl,/DELAYLOAD:" + dll, full ?? "delayimp.lib"];
       })() : [])];
   const steps: [string, string[]][] = bangs
     ? [[cc, gpu], [path.resolve(out), ["+RTS", "--gpu-build"]]] : [[cc, cpu]];
@@ -1081,7 +1087,7 @@ async function book_read(file: string, base?: Bend.Book,
     await Bend.book_load(book, file, "", seen);
     const laws = path.join(path.dirname(file), "LAWS.bend");
     if (path.basename(file) === "PROOF.bend" && fs.existsSync(laws)
-      && !seen.has(fs.realpathSync(laws))) {
+      && !seen.has(path_fwd(fs.realpathSync(laws)))) {
       throw "Error: PROOF.bend must import ./LAWS.bend";
     }
     Bend.book_valid(book, base?.order.length ?? 0);

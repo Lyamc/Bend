@@ -912,10 +912,15 @@ function path_fwd(p: string): string {
 }
 
 function path_drive(p: string): boolean {
-  return /^[A-Za-z]:/.test(p);
+  return /^[A-Za-z]:/.test(p) || p.startsWith("//") || p.startsWith("\\\\");
 }
 
 function path_resolve(dir: string, rel: string): string {
+  // A leading slash is a POSIX absolute path. win32.resolve would pin it
+  // to the current drive (C:/shared/...).
+  if (rel.startsWith("/") && !rel.startsWith("//")) {
+    return path.posix.normalize(rel);
+  }
   return path_drive(dir) || path_drive(rel)
     ? path_fwd(path.win32.resolve(dir, rel)) : path.posix.resolve(dir, rel);
 }

@@ -30,6 +30,32 @@ function io_sys_win(ffi) {
   const sok = (fd) => tab[fd];
   const last = { n: 0 };
   const map_err = (e) => e === 10035 ? 11 : e === 10036 ? 115 : e;
+  let append_ask = null;
+  const win_appends = (fd) => {
+    try {
+      if (append_ask === null) {
+        const crt = ffi.dlopen("ucrtbase.dll", {
+          _get_osfhandle: { args: ["i32"], returns: "u64" },
+        });
+        const ntdll = ffi.dlopen("ntdll.dll", {
+          NtQueryInformationFile: { args: ["u64", "ptr", "ptr", "u32", "i32"],
+            returns: "i32" },
+        });
+        append_ask = { crt, ntdll };
+      }
+      const h = append_ask.crt.symbols._get_osfhandle(fd);
+      if (h === 0n || h === 0xFFFFFFFFFFFFFFFFn) {
+        return false;
+      }
+      const iosb = new Uint8Array(16);
+      const mode = new Uint32Array(1);
+      const st = append_ask.ntdll.symbols.NtQueryInformationFile(h,
+        ffi.ptr(iosb), ffi.ptr(mode), 4, 16);
+      return st === 0 && (mode[0] & 4) !== 0;
+    } catch (_) {
+      return false;
+    }
+  };
   const fail = () => {
     last.n = map_err(ws.symbols.WSAGetLastError());
     return -1;
@@ -66,7 +92,9 @@ function io_sys_win(ffi) {
         4: "Interrupted system call", 5: "Input/output error",
         11: "Resource temporarily unavailable", 13: "Permission denied",
         17: "File exists", 20: "Not a directory", 21: "Is a directory",
-        22: "Invalid argument", 27: "File too large", 28: "No space left on device",
+        9: "Bad file descriptor", 22: "Invalid argument",
+        27: "File too large", 28: "No space left on device",
+        90: "Message too long",
         32: "Broken pipe", 98: "Address already in use",
         110: "Connection timed out", 111: "Connection refused" };
       const n = (code | 0) < 0 ? -(code | 0) : code | 0;
@@ -108,6 +136,11 @@ function io_sys_win(ffi) {
     },
     recvfrom: (fd, b, n, f, a, al) => {
       const r = ws.symbols.recvfrom(sok(fd), b, n, f, a, al);
+      // Winsock drops the tail and reports WSAEMSGSIZE. Linux returns the
+      // bytes that fit and keeps the next datagram whole.
+      if (r < 0 && ws.symbols.WSAGetLastError() === 10040) {
+        return n;
+      }
       return r < 0 ? fail() : r;
     },
     close: (fd) => {
@@ -117,7 +150,7 @@ function io_sys_win(ffi) {
     },
     fcntl: (fd, cmd, arg) => {
       if (cmd === 3) {
-        return 0;
+        return win_appends(fd) ? 0x400 : 0;
       }
       if (cmd === 4) {
         const nb = new Uint32Array([(arg & 0x800) ? 1 : 0]);
@@ -129,7 +162,8 @@ function io_sys_win(ffi) {
     },
     setsockopt: (fd, level, name, v, n) => {
       const L = level === 1 ? 0xFFFF : level;
-      const N = name === 2 ? 4 : name;
+      const opt = { 2: 4, 7: 0x1001, 8: 0x1002 };
+      const N = opt[name] ?? name;
       return ws.symbols.setsockopt(sok(fd), L, N, v, n) === 0 ? 0 : fail();
     },
     getsockopt: (fd, level, name, v, n) => {

@@ -12,6 +12,15 @@ function file_open_with(name, mode) {
   if (!["r", "r+", "w", "a", "x"].includes(mode)) {
     return io_fail(22);
   }
+  if (process.platform === "win32" && name === "/etc/hosts") {
+    name = (process.env.SystemRoot || "C:\\Windows") + "\\System32\\drivers\\etc\\hosts";
+  }
+  if (process.platform === "win32" && name === "/dev/zero") {
+    const held = globalThis.BEND_ZERO ?? (globalThis.BEND_ZERO = new Set());
+    const fd = -(held.size + 2);
+    held.add(fd);
+    return io_done(fd);
+  }
   try {
     // Node spells "x" as "wx".
     const fd = require("fs").openSync(name.length > 0 ? Buffer.from(name) : "",

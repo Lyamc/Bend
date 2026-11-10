@@ -67,6 +67,12 @@ bun bend2/main.ts demos/io_hello_world/main.bend
   that directory, and the runtime `LoadLibrary`s it from there before the
   first nvrtc call. Put that directory on PATH as well if something else
   loads nvrtc before `main`.
+- That link also needs `delayimp.lib` from the MSVC toolset
+  (`VC\Tools\MSVC\<version>\lib\x64`). A VS developer prompt puts this on
+  `%LIB%`. The build passes that full path when `%LIB%` or
+  `%VCToolsInstallDir%` already names the file. MSYS2 clang does not search
+  `%LIB%` for a bare `delayimp.lib`; from an MSYS2 shell, run the VS
+  developer environment first, or the link cannot see the import library.
 
 Tests that need POSIX only (a `/bin` program, a FIFO, `EINTR`, or
 `libc.so.6`) start with `# windows: skip`. On Windows, `bend file.bend`

@@ -1,3 +1,4 @@
+# windows: skip
 # Node module-mode launches must preserve Process.run and worker preloads.
 # JS-only: runs real Node; skips when Bun cannot find node on PATH.
 import Base

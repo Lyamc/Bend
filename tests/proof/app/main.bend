@@ -1,4 +1,7 @@
+# windows: skip
 # the program's main module: it greets forever, by an @unsafe loop
+# The Linux suite only runs tests/<namespace>/*.bend, so this nested
+# fixture is never executed there. Running it is an infinite loop.
 import Base
 import ./greet.bend as G
 
