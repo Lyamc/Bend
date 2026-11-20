@@ -401,6 +401,7 @@ typedef struct {
   f32      sx, sy;
   u32      cw, ch;
   bool     tracked;
+  bool     headless;
 } BendWin;
 
 // winmm-like effect sources are linked by pragma already; the input method
@@ -1638,16 +1639,30 @@ static u32 window_make(const char* title, u32 w, u32 h, intptr_t* out,
   } else {
     wt[0] = 0;
   }
-  HWND hwnd = CreateWindowExW(0, L"BendWin", wt,
-    WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE,
-    CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top,
-    NULL, NULL, GetModuleHandleW(NULL), NULL);
+  // A desktop session is not always there (a service, a CI runner, a
+  // headless sweep). A message-only HWND needs no desktop: the event
+  // feeders still drive window_proc through SendMessage, and frames only
+  // pump the queue. BEND_HEADLESS forces that path for the gates.
+  bool headless = getenv("BEND_HEADLESS") != NULL;
+  HWND hwnd = NULL;
+  if (!headless) {
+    hwnd = CreateWindowExW(0, L"BendWin", wt,
+      WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE,
+      CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top,
+      NULL, NULL, GetModuleHandleW(NULL), NULL);
+  }
+  if (hwnd == NULL) {
+    headless = true;
+    hwnd = CreateWindowExW(0, L"BendWin", wt, 0, 0, 0, w, h,
+      HWND_MESSAGE, NULL, GetModuleHandleW(NULL), NULL);
+  }
   free(wt);
   if (hwnd == NULL) {
     *why = "Window.open: no display (build a native binary with bend <file> -o <out> and run it from a desktop session)";
     return ENOTSUP;
   }
   BendWin* win = io_mem(calloc(1, sizeof *win));
+  win->headless = headless;
   win->hwnd = hwnd;
   win->width = w;
   win->height = h;
@@ -1658,8 +1673,10 @@ static u32 window_make(const char* title, u32 w, u32 h, intptr_t* out,
   win->style = GetWindowLongW(hwnd, GWL_STYLE);
   window_view(win);
   SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)win);
-  ShowWindow(hwnd, SW_SHOW);
-  UpdateWindow(hwnd);
+  if (!headless) {
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
+  }
   *out = (intptr_t)win;
   return 0;
 }
@@ -2506,6 +2523,9 @@ static void window_pace(u64 period) {
 }
 
 static void window_show(Env e, BendWin* win, Term image) {
+  if (win->headless) {
+    return;
+  }
   u32 w = win->width;
   u32 h = win->height;
   u32 k = cls_fit(w > h ? w : h);
@@ -2658,6 +2678,11 @@ static u32 window_fullscreen(intptr_t at, bool on, const char** why) {
 
 static u32 window_fullscreen(intptr_t at, bool on, const char** why) {
   BendWin* win = (BendWin*)at;
+  if (win->headless) {
+    win->full_now = on;
+    window_view(win);
+    return 0;
+  }
   if (!IsWindow(win->hwnd) || !IsWindowVisible(win->hwnd)) {
     *why = "Window.fullscreen: window is not on screen";
     return EAGAIN;
