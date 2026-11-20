@@ -73,6 +73,8 @@ function tokens(source: string): Token[] {
       kind = "comment";
     } else if (c === '"' || c === "'") {
       at++;
+      // In ''', the middle apostrophe is the character.
+      if (c === "'" && source[at] === "'") at++;
       while (at < source.length) {
         if (source[at] === "\\") {
           at += 2;
@@ -171,7 +173,8 @@ function separator(a: Node, b: Node): string {
     y = first(b),
     l = x.text,
     r = y.text;
-  if (y.kind === "comment") return "  ";
+  // `%# note` is a rewrite, `%  # note` a modulo.
+  if (y.kind === "comment") return l === "%" && x.end === y.beg ? "" : "  ";
   if (r === "," || r === ";" || r === ":" || r === "?" || r === "!" || r === ".") return "";
   if (l === "," || l === ";" || l === ":") return " ";
   if (["~", "@", "?", "!", "\\"].includes(l)) return "";
