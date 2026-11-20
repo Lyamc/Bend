@@ -11,8 +11,7 @@ import * as fs from "node:fs";
 
 import * as Bend from "./bend.ts";
 
-const WINPOSIX = fs.readFileSync(new URL("./effs/winposix.c", import.meta.url), "utf8");
-const WINJS = fs.readFileSync(new URL("./effs/io_sys_win.js", import.meta.url), "utf8");
+const [WINPOSIX, WINJS] = ["winposix.c","io_sys_win.js"].map(f=>fs.readFileSync(new URL("./effs/"+f,import.meta.url),"utf8"));
 
 // Types
 // =====
@@ -3230,7 +3229,7 @@ ${WINPOSIX}
 #define BAR()   __syncthreads()
 #define BARD()  { __threadfence(); __syncthreads(); }
 #else
-#if !defined(_WIN32) && __has_attribute(preserve_none) && __has_attribute(preserve_most) \
+#if !_WIN32 && __has_attribute(preserve_none) && __has_attribute(preserve_most) \
   && __OPTIMIZE__
 #define PRESERVE(A) __attribute__((A))
 #else
@@ -4606,7 +4605,7 @@ extern "C" __global__ void bend_dev(DEV u64* H, u32 pass, u32 at) {
 // Window
 // ======
 
-#if defined(__linux__) || defined(_WIN32) || BEND_RTC
+#if __linux__ || _WIN32 || BEND_RTC
 
 INLINE u32 window_pix(DEV u64* H, Term t, u32 k, u32 x, u32 y) {
   for (u32 i = k; term_tag(t) == TAG_CTR;) {
@@ -5384,30 +5383,17 @@ OUTLINE void* io_mem(void* mem) {
   return mem;
 }
 
-typedef union { struct sockaddr_in v4; struct sockaddr_in6 v6; } IoAddr;
-
-// A numeric host: canonical IPv4 quad or IPv6 literal (a colon selects
-// IPv6, including "::ffff:1.2.3.4"). No DNS. Callers use sin_family for
-// socket() and alen for bind/connect/sendto.
-static int io_sys_addr(const char* h, u32 port, IoAddr* at, socklen_t* alen) {
-  memset(at, 0, sizeof *at);
-  if (port > 65535) return -1;
-  if (strchr(h, ':') != NULL) {
-    at->v6.sin6_family = AF_INET6;
-    at->v6.sin6_port = htons((uint16_t)port);
-    if (inet_pton(AF_INET6, h, &at->v6.sin6_addr) != 1) return -1;
-    *alen = sizeof(struct sockaddr_in6);
-    return 0;
-  }
-  for (const char* p = h; *p; p += 1) {
-    if ((p == h || p[-1] == '.') && *p == '0' && p[1] >= '0' && p[1] <= '9')
+static int io_sys_addr(const char* host, u32 port, struct sockaddr_in* at) {
+  *at = (struct sockaddr_in){ .sin_family = AF_INET,
+    .sin_port = htons((uint16_t)port) };
+  for (const char* p = host; *p != 0; p += 1) {
+    if ((p == host || p[-1] == '.') && *p == '0'
+      && p[1] >= '0' && p[1] <= '9') {
       return -1;
+    }
   }
-  at->v4.sin_family = AF_INET;
-  at->v4.sin_port = htons((uint16_t)port);
-  if (inet_pton(AF_INET, h, &at->v4.sin_addr) != 1) return -1;
-  *alen = sizeof(struct sockaddr_in);
-  return 0;
+  return port > 65535 || inet_pton(AF_INET, host, &at->sin_addr) != 1
+    ? -1 : 0;
 }
 
 static int    io_argc;
@@ -6350,68 +6336,16 @@ function io_unlist(xs) {
   return b.some((x) => x > 255) ? null : Uint8Array.from(b);
 }
 
-// Numeric host only (no DNS): canonical IPv4 quad or IPv6 literal.
 function io_addr(host, port) {
-  const mac = io_sys().mac;
-  const dec = (p) => /^(0|[1-9]\d{0,2})$/.test(p) && p < 256;
-  if (port > 65535) return null;
-  if (!host.includes(":")) {
-    const q = host.split(".");
-    if (q.length !== 4 || !q.every(dec)) return null;
-    return { buf: Uint8Array.from([...(mac ? [16, 2] : [2, 0]),
-      port >> 8, port & 255, ...q.map(Number)]), len: 16, family: 2 };
+  const part = host.split(".");
+  const deci = (p) => /^(0|[1-9]\d{0,2})$/.test(p) && Number(p) < 256;
+  if (port > 65535 || part.length !== 4 || !part.every(deci)) {
+    return null;
   }
-  const word = (p) => {
-    if (p.includes(".")) {
-      const q = p.split(".");
-      return q.length === 4 && q.every(dec)
-        ? [(q[0] << 8) | +q[1], (+q[2] << 8) | +q[3]] : null;
-    }
-    return /^[0-9a-fA-F]{1,4}$/.test(p) ? [parseInt(p, 16)] : null;
-  };
-  const parse = (part) => {
-    if (!part) return [];
-    const out = [];
-    for (const p of part.split(":")) {
-      const w = word(p);
-      if (w === null) return null;
-      out.push(...w);
-    }
-    return out;
-  };
-  const h = host.split("::");
-  if (h.length > 2) return null;
-  const left = parse(h[0]), right = h.length === 2 ? parse(h[1]) : [];
-  if (left === null || right === null) return null;
-  const missing = 8 - left.length - right.length;
-  if (missing < 0 || (h.length === 2 && missing < 1)) return null;
-  const words = [...left, ...Array(h.length === 2 ? missing : 0).fill(0),
-    ...right];
-  if (words.length !== 8) return null;
-  const fam = mac ? 30 : process.platform === "win32" ? 23 : 10;
-  const b = new Uint8Array(28);
-  b.set(mac ? [28, fam] : [fam, 0]);
-  b[2] = port >> 8; b[3] = port & 255;
-  words.forEach((w, i) => { b[8 + 2 * i] = w >> 8; b[9 + 2 * i] = w & 255; });
-  return { buf: b, len: 28, family: fam };
-}
-
-// inet_ntop's spelling: lowercase hex, longest zero run as "::" (first on
-// a tie), IPv4-mapped as a dotted quad.
-function io_addr6_text(b) {
-  const w = [];
-  for (let i = 0; i < 8; i += 1) w.push((b[8 + 2 * i] << 8) | b[9 + 2 * i]);
-  if (w.slice(0, 5).every((x) => x === 0) && w[5] === 0xffff)
-    return "::ffff:" + (w[6] >> 8) + "." + (w[6] & 255) + "."
-      + (w[7] >> 8) + "." + (w[7] & 255);
-  let at = -1, best = 0, s = -1, r = 0;
-  for (let i = 0; i <= 8; i += 1) {
-    if (i < 8 && w[i] === 0) { if (s < 0) s = i; r += 1; }
-    else { if (r > best) { best = r; at = s; } s = -1; r = 0; }
-  }
-  const h = (x) => x.toString(16);
-  return best < 2 ? w.map(h).join(":")
-    : w.slice(0, at).map(h).join(":") + "::" + w.slice(at + best).map(h).join(":");
+  const b = new Uint8Array(16);
+  b.set([...io_sys().mac ? [16, 2] : [2, 0], port >> 8, port & 255,
+    ...part.map(Number)]);
+  return b;
 }
 
 let io_active;
