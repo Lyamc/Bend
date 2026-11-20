@@ -12,6 +12,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <winioctl.h>
 #include <process.h>
 #include <io.h>
 #include <fcntl.h>
@@ -38,9 +39,22 @@
 #pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "bcrypt.lib")
 
-#ifndef ENOTSUP
-#define ENOTSUP 129
-#endif
+// Every lane speaks POSIX errno numbers: the tests accept the macOS or Linux
+// code (EILSEQ 92 or 84, ENOTSUP 45 or 95), and the JS lane answers the same.
+// The Windows CRT numbers a few of them differently (EILSEQ 42, ENOTSUP 129,
+// EOVERFLOW 132, EWOULDBLOCK 140, ENOSYS 40), so renumber those to the Linux
+// values here, before the effects that use them are spliced in. The shims below
+// already answer Linux numbers (win_wsa_errno, win_strerror).
+#undef EILSEQ
+#define EILSEQ 84
+#undef ENOTSUP
+#define ENOTSUP 95
+#undef EOVERFLOW
+#define EOVERFLOW 75
+#undef EWOULDBLOCK
+#define EWOULDBLOCK EAGAIN
+#undef ENOSYS
+#define ENOSYS 38
 #ifndef ENODEV
 #define ENODEV 19
 #endif
@@ -52,12 +66,6 @@
 #endif
 #ifndef EAGAIN
 #define EAGAIN 11
-#endif
-#ifndef EWOULDBLOCK
-#define EWOULDBLOCK EAGAIN
-#endif
-#ifndef EOVERFLOW
-#define EOVERFLOW 132
 #endif
 
 #ifndef O_RDONLY
@@ -196,6 +204,14 @@ struct sigaction {
 #define POLLOUT 0x004
 #define POLLERR 0x008
 #define POLLHUP 0x010
+// WSAPoll answers its own revent bits, which collide with the poll.h values
+// above (its POLLHUP is 0x0002, its POLLRDNORM 0x0100); name them apart.
+#define WPOLL_RDNORM 0x0100
+#define WPOLL_RDBAND 0x0200
+#define WPOLL_WRNORM 0x0010
+#define WPOLL_ERR    0x0001
+#define WPOLL_HUP    0x0002
+#define WPOLL_NVAL   0x0004
 #define pollfd bend_pollfd
 struct bend_pollfd {
   int   fd;
@@ -239,6 +255,8 @@ static int win_is_map(void* at) {
   return win_in_list(win_maps, at);
 }
 
+static int ftrylockfile(FILE* f);
+
 static void win_guard_add(void* p, size_t n) {
   win_guard* g = (win_guard*)malloc(sizeof *g);
   if (g == NULL) {
@@ -255,7 +273,19 @@ static LONG CALLBACK win_veh(PEXCEPTION_POINTERS x) {
     return EXCEPTION_CONTINUE_SEARCH;
   }
   void* at = (void*)x->ExceptionRecord->ExceptionInformation[1];
-  if (win_is_guard(at) || !win_is_map(at)) {
+  if (win_is_guard(at)) {
+    // A worker stack overran into its guard page: the memory-fault law, the
+    // same one line err_trap prints on the Unix lanes (ERR_TEXT[7]), then
+    // exit 1. Flush what the program already printed, as err_trap does.
+    static const char line[] = "bend: memory fault (machine stack overflow?)\n";
+    if (ftrylockfile(stdout) == 0) {
+      fflush(stdout);
+    }
+    DWORD wrote = 0;
+    WriteFile(GetStdHandle(STD_ERROR_HANDLE), line, sizeof line - 1, &wrote, NULL);
+    ExitProcess(1);
+  }
+  if (!win_is_map(at)) {
     return EXCEPTION_CONTINUE_SEARCH;
   }
   void* page = (void*)((uintptr_t)at & ~(uintptr_t)65535);
@@ -272,6 +302,18 @@ static void win_init(void) {
   WSADATA w;
   WSAStartup(MAKEWORD(2, 2), &w);
   AddVectoredExceptionHandler(1, win_veh);
+}
+
+// A redirected standard stream carries bytes, not text: the interpreter
+// prints \n, so a pipe, file or socket must not turn \n into \r\n (nor a
+// CRLF read into \n), or the native lane stops matching the other two. A
+// console keeps text mode, so its lines still start in column 0.
+static void __attribute__((constructor)) win_stdio_boot(void) {
+  for (int fd = 0; fd <= 2; fd += 1) {
+    if (!_isatty(fd)) {
+      _setmode(fd, _O_BINARY);
+    }
+  }
 }
 
 static int win_wsa_errno(void) {
@@ -352,12 +394,18 @@ static int munmap(void* p, size_t n) {
 }
 
 static SOCKET win_sok(int fd);
+static int win_is_sock(int fd);
 static ssize_t win_send(int fd, const void* buf, size_t n, int flags);
 static ssize_t win_recv(int fd, void* buf, size_t n, int flags);
 static SOCKET win_wake_r = INVALID_SOCKET;
 static SOCKET win_wake_w = INVALID_SOCKET;
 static int win_sig_on = 0;
 #define WIN_FIFO_BIT 0x40000000u
+// A /dev/zero fd: reads answer zeros, writes vanish, as on Linux.
+#define WIN_ZERO_BIT 0x20000000u
+#ifndef S_ISREG
+#define S_ISREG(m) (((m) & _S_IFMT) == _S_IFREG)
+#endif
 static unsigned win_file_flags[65536];
 static int (*win_on_open)(const char*, int, int, int*);
 static int (*win_on_read)(int, void*, size_t, ssize_t*);
@@ -439,7 +487,7 @@ static int win_select(int nfds, fd_set* rfds, fd_set* wfds, fd_set* efds,
   }
   ready = 0;
   if (ret > 0 && wake >= 0
-    && (p[wake].revents & (POLLRDNORM | POLLIN | POLLHUP | POLLERR))) {
+    && (p[wake].revents & (WPOLL_RDNORM | WPOLL_ERR | WPOLL_HUP | WPOLL_NVAL))) {
     char dump[64];
     while (recv(win_wake_r, dump, sizeof dump, 0) > 0) {
     }
@@ -454,13 +502,14 @@ static int win_select(int nfds, fd_set* rfds, fd_set* wfds, fd_set* efds,
         continue;
       }
       int fd = map[i];
-      if (p[i].revents & (POLLRDNORM | POLLHUP | POLLERR | POLLIN)) {
+      short re = p[i].revents;
+      if (re & (WPOLL_RDNORM | WPOLL_RDBAND | WPOLL_HUP | WPOLL_ERR | WPOLL_NVAL)) {
         if (r != NULL) {
           r[fd / 8] |= (unsigned char)(1 << (fd % 8));
         }
         ready += 1;
       }
-      if (p[i].revents & POLLWRNORM) {
+      if (re & (WPOLL_WRNORM | WPOLL_HUP | WPOLL_ERR | WPOLL_NVAL)) {
         if (w != NULL) {
           w[fd / 8] |= (unsigned char)(1 << (fd % 8));
         }
@@ -886,6 +935,19 @@ static int win_open(const char* path, int flags, ...) {
   if (fifo >= 0) {
     return win_fifo_open(win_fifos[fifo].name, flags);
   }
+  static const char* const win_stds[3] = { "/dev/stdin", "/dev/stdout",
+    "/dev/stderr" };
+  if (path != NULL) {
+    for (int i = 0; i < 3; i += 1) {
+      if (strcmp(path, win_stds[i]) == 0) {
+        int fd = _dup(i);
+        if (fd >= 0 && (unsigned)fd < 65536u) {
+          win_file_flags[fd] = (unsigned)flags;
+        }
+        return fd;
+      }
+    }
+  }
   if (path != NULL && strcmp(path, "/dev/null") == 0) {
     if (flags & O_EXCL) {
       errno = EEXIST;
@@ -893,9 +955,23 @@ static int win_open(const char* path, int flags, ...) {
     }
     path = "NUL";
   }
+  int zero = path != NULL && strcmp(path, "/dev/zero") == 0;
+  if (zero) {
+    path = "NUL";
+  }
+  // /etc/hosts is the small stable file the upstream tests lean on; it lives
+  // under %SystemRoot% on Windows.
+  char hosts[MAX_PATH];
+  if (path != NULL && strcmp(path, "/etc/hosts") == 0 && _access(path, 0) != 0) {
+    const char* root = getenv("SystemRoot");
+    if (root != NULL) {
+      snprintf(hosts, sizeof hosts, "%s\\System32\\drivers\\etc\\hosts", root);
+      path = hosts;
+    }
+  }
   int fd = _open(path, flags | _O_BINARY, mode);
   if (fd >= 0 && (unsigned)fd < 65536u) {
-    win_file_flags[fd] = (unsigned)flags;
+    win_file_flags[fd] = (unsigned)flags | (zero ? WIN_ZERO_BIT : 0);
   }
   return fd;
 }
@@ -913,6 +989,10 @@ static int win_is_sock(int fd) {
 }
 
 static ssize_t win_read(int fd, void* buf, size_t n) {
+  if ((unsigned)fd < 65536u && (win_file_flags[fd] & WIN_ZERO_BIT)) {
+    memset(buf, 0, n);
+    return (ssize_t)n;
+  }
   if (win_on_read != NULL) {
     ssize_t out = 0;
     if (win_on_read(fd, buf, n, &out)) {
@@ -929,6 +1009,9 @@ static ssize_t win_read(int fd, void* buf, size_t n) {
 }
 
 static ssize_t win_write(int fd, const void* buf, size_t n) {
+  if ((unsigned)fd < 65536u && (win_file_flags[fd] & WIN_ZERO_BIT)) {
+    return (ssize_t)n;
+  }
   if (win_on_write != NULL) {
     ssize_t out = 0;
     if (win_on_write(fd, buf, n, &out)) {
@@ -943,6 +1026,31 @@ static ssize_t win_write(int fd, const void* buf, size_t n) {
   }
   return _write(fd, buf, n > INT_MAX ? INT_MAX : (unsigned)n);
 }
+
+// A redirected stdout can be a socket (the pipe shim): the CRT's _write
+// drives it with WriteFile, which a socket rejects, so every fwrite sends
+// through the shim instead. The macro below keeps fwrite's signature.
+static size_t win_fwrite(const void* buf, size_t sz, size_t n, FILE* h) {
+  int fd = _fileno(h);
+  if (fd < 0 || !win_is_sock(fd)) {
+    return fwrite(buf, sz, n, h);
+  }
+  size_t len = sz * n;
+  size_t at = 0;
+  while (at < len) {
+    ssize_t w = win_write(fd, (const char*)buf + at, len - at);
+    if (w > 0) {
+      at += (size_t)w;
+    } else if (w < 0 && (errno == EAGAIN || errno == EINTR)) {
+      Sleep(1);
+    } else {
+      break;
+    }
+  }
+  return sz == 0 ? 0 : at / sz;
+}
+
+#define fwrite(B, S, N, F) win_fwrite(B, S, N, F)
 
 static int win_dup2(int from, int to) {
   if (to > 512) {
@@ -1177,11 +1285,11 @@ static int fcntl(int fd, int cmd, ...) {
   va_end(ap);
   if (cmd == F_GETFL) {
     unsigned f = fd >= 0 && (unsigned)fd < 65536u ? win_file_flags[fd] : 0;
-    return (int)(f & ~WIN_FIFO_BIT);
+    return (int)(f & ~(WIN_FIFO_BIT | WIN_ZERO_BIT));
   }
   if (cmd == F_SETFL) {
     if (fd >= 0 && (unsigned)fd < 65536u) {
-      unsigned keep = win_file_flags[fd] & WIN_FIFO_BIT;
+      unsigned keep = win_file_flags[fd] & (WIN_FIFO_BIT | WIN_ZERO_BIT);
       win_file_flags[fd] = (unsigned)arg | keep;
       if (keep) {
         DWORD mode = (arg & O_NONBLOCK) ? PIPE_NOWAIT : PIPE_WAIT;
@@ -1356,6 +1464,10 @@ static int pipe(int fds[2]) {
 #define off_t long long
 
 static ssize_t pread(int fd, void* buf, size_t n, off_t off) {
+  if ((unsigned)fd < 65536u && (win_file_flags[fd] & WIN_ZERO_BIT)) {
+    memset(buf, 0, n);
+    return (ssize_t)n;
+  }
   __int64 cur = _telli64(fd);
   if (cur < 0 || _lseeki64(fd, off, SEEK_SET) < 0) {
     return -1;
@@ -1383,6 +1495,9 @@ static ssize_t getrandom(void* buf, size_t n, unsigned flags) {
 #define stat  _stat64
 
 static ssize_t pwrite(int fd, const void* buf, size_t n, off_t off) {
+  if ((unsigned)fd < 65536u && (win_file_flags[fd] & WIN_ZERO_BIT)) {
+    return (ssize_t)n;
+  }
   if (win_on_pwrite != NULL) {
     ssize_t out = 0;
     if (win_on_pwrite(fd, buf, n, (long long)off, &out)) {
@@ -1390,7 +1505,21 @@ static ssize_t pwrite(int fd, const void* buf, size_t n, off_t off) {
     }
   }
   __int64 cur = _telli64(fd);
-  if (cur < 0 || _lseeki64(fd, off, SEEK_SET) < 0) {
+  if (cur < 0) {
+    return -1;
+  }
+  // A write past the end makes a sparse file, as on Linux: a file "size" is
+  // address space, not zero-filled disk. NTFS otherwise spins filling the
+  // hole, which turns one positioned write a gigabyte out into seconds.
+  if (off > 0) {
+    __int64 end = _lseeki64(fd, 0, SEEK_END);
+    if (end >= 0 && (__int64)off > end) {
+      DWORD got = 0;
+      DeviceIoControl((HANDLE)_get_osfhandle(fd), FSCTL_SET_SPARSE, NULL, 0,
+        NULL, 0, &got, NULL);
+    }
+  }
+  if (_lseeki64(fd, off, SEEK_SET) < 0) {
     return -1;
   }
   int r = _write(fd, buf, n > INT_MAX ? INT_MAX : (unsigned)n);
@@ -1437,6 +1566,10 @@ static const char* win_strerror(int e) {
     case 27: return "File too large";
     case 28: return "No space left on device";
     case 32: return "Broken pipe";
+    case 38: return "Function not implemented";
+    case 75: return "Value too large for defined data type";
+    case 84: return "Illegal byte sequence";
+    case 95: return "Operation not supported";
     case 98: return "Address already in use";
     case 110: return "Connection timed out";
     case 111: return "Connection refused";

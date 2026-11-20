@@ -7,6 +7,7 @@ function fifo_drain(len, hi, k) {
   const sys = io_sys();
   if (process.platform === "win32") {
     const path = `/tmp/bend_fifo_js_${process.pid}`;
+    sys.unlink(path);
     sys.mkfifo(path);
     let rd = sys.fifo_open(path, 0x800);
     const ack = `\\\\.\\pipe\\bend_ack_${process.pid}_${Date.now()}`;

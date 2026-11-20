@@ -3,6 +3,11 @@
 
 function file_write_buffer(file, b, offset = null) {
   const fs = require("fs");
+  // A write to a standard stream must land after the text IO.print holds,
+  // as the C lane's dup of the fd does.
+  if (file <= 2 || globalThis.BEND_STD?.has(file)) {
+    io_sync();
+  }
   let at = 0;
   try {
     while (at < b.length) {

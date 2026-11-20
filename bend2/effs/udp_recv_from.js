@@ -14,8 +14,8 @@ function udp_recv_from_with(socket, max, k, read, at) {
   // IPv4's 65535-byte packet has at least 20 IP and 8 UDP header bytes.
   const size = Math.min(Number(max), 65507);
   const b = new Uint8Array(size);
-  const peer = new Uint8Array(16);
-  const len = new Uint32Array([16]);
+  const peer = new Uint8Array(28);
+  const len = new Uint32Array([28]);
   const intr = 4;
   const go = () => {
     let n = Number(sys.recvfrom(fd, sys.ptr(b), size, 0, sys.ptr(peer),
@@ -35,7 +35,10 @@ function udp_recv_from_with(socket, max, k, read, at) {
       io_park_on(fd, false, k, go, at);
       return undefined;
     }
-    const host = peer[4] + "." + peer[5] + "." + peer[6] + "." + peer[7];
+    const family = sys.mac ? peer[1] : peer[0];
+    const host = family === 2
+      ? peer[4] + "." + peer[5] + "." + peer[6] + "." + peer[7]
+      : io_addr6_text(peer);
     const port = (peer[2] << 8) | peer[3];
     const dgram = io_tup(host, port, read(b, n));
     return io_tup(socket, io_ready(at, io_done(dgram)));

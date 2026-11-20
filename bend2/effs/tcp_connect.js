@@ -9,7 +9,7 @@ function tcp_connect(host, port, k) {
     return io_fail(22);
   }
   const sys = io_sys();
-  const fd = sys.socket(2, 1, 0);
+  const fd = sys.socket(at.family, 1, 0);
   if (fd < 0) {
     return io_fail(sys.errno());
   }
@@ -27,7 +27,7 @@ function tcp_connect(host, port, k) {
       sys.ptr(v), sys.ptr(l)) < 0 ? sys.errno() : v[0];
   };
   const set = sys.fcntl(fd, 4, sys.fcntl(fd, 3, 0) | (sys.mac ? 4 : 0x800));
-  const ok = set >= 0 && sys.connect(fd, sys.ptr(at), 16) >= 0;
+  const ok = set >= 0 && sys.connect(fd, sys.ptr(at.buf), at.len) >= 0;
   const code = ok ? 0 : sys.errno();
   // An interrupted connect (EINTR, 4) goes on in the background, so it is
   // waited on as EINPROGRESS is.

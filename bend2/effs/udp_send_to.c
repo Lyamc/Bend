@@ -7,13 +7,14 @@
 // bytes (io_list).
 static Term udp_send_to_with(Env e, IoWork* w, IoPack more,
   Term (*make)(Env, const char*, u64)) {
-  struct sockaddr_in at;
+  IoAddr at;
+  socklen_t alen = 0;
   int     fd = (int)w->hand;
   ssize_t n  = -1;
   errno      = EINVAL;
-  if (io_sys_addr(w->text, (u32)w->made, &at) == 0) {
+  if (io_sys_addr(w->text, (u32)w->made, &at, &alen) == 0) {
     do {
-      n = sendto(fd, w->data, w->size, 0, (struct sockaddr*)&at, sizeof(at));
+      n = sendto(fd, w->data, w->size, 0, (struct sockaddr*)&at, alen);
     } while (n < 0 && errno == EINTR);
   }
   io_sys_end(w, n);

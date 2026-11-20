@@ -2,6 +2,54 @@
 // Winsock behind the same calls the Unix runtime makes on libc. Socket
 // handles are table indexes, because select's bitsets are fd-sized.
 
+// Bun's node:fs descriptors are not CRT descriptors: Bun links its own UCRT,
+// and the ucrtbase.dll bun:ffi loads keeps a separate fd table whose
+// _get_osfhandle rejects a Bun fd by aborting the process. So learn which
+// handles append by watching node:fs, before any program runs, instead of
+// asking the CRT. fds 0..2 stay the process's own, and win_appends asks the
+// CRT about those (a shell's >> on stdout).
+const win_append_fds = (() => {
+  const fds = new Set();
+  if (typeof process === "undefined" || process.platform !== "win32"
+    || typeof require !== "function") {
+    return fds;
+  }
+  try {
+    const fs = require("fs");
+    if (typeof fs.openSync !== "function" || fs.openSync.bend_win) {
+      return fds;
+    }
+    const app = (fs.constants && fs.constants.O_APPEND) || 0x400;
+    const adds = (flags) => typeof flags === "string" ? flags.includes("a")
+      : typeof flags === "number" && (flags & app) !== 0;
+    const open = fs.openSync;
+    const mark = function (path, flags, ...rest) {
+      const fd = open.call(this, path, flags, ...rest);
+      if (typeof fd === "number") {
+        if (adds(flags)) {
+          fds.add(fd);
+        } else {
+          fds.delete(fd);
+        }
+      }
+      return fd;
+    };
+    mark.bend_win = true;
+    fs.openSync = mark;
+    const close = fs.closeSync;
+    if (typeof close === "function" && !close.bend_win) {
+      const shut = function (fd) {
+        fds.delete(fd);
+        return close.call(this, fd);
+      };
+      shut.bend_win = true;
+      fs.closeSync = shut;
+    }
+  } catch (_) {
+  }
+  return fds;
+})();
+
 function io_sys_win(ffi) {
   const T = { i: "i32", u: "u32", U: "u64", I: "i64", p: "ptr" };
   const spec = (s) => Object.fromEntries(s.split(" ").map((x) => {
@@ -9,6 +57,8 @@ function io_sys_win(ffi) {
     return [name, { args: [...(args ?? "")].map((a) => T[a] ?? "ptr"),
       returns: T[ret] ?? "i32" }];
   }));
+  const as_path = (p) => typeof p === "string" ? p
+    : Buffer.from(p).toString("utf8");
   const ws = ffi.dlopen("ws2_32.dll", spec(
     "WSAStartup:up>i WSAGetLastError:>i socket:iii>U bind:Upu>i listen:Ui>i"
     + " connect:Upu>i accept:Upp>U send:UpUi>i recv:UpUi>i sendto:UpUipu>i"
@@ -32,6 +82,14 @@ function io_sys_win(ffi) {
   const map_err = (e) => e === 10035 ? 11 : e === 10036 ? 115 : e;
   let append_ask = null;
   const win_appends = (fd) => {
+    if (win_append_fds.has(fd)) {
+      return true;
+    }
+    // Only the process's own descriptors live in the CRT's table; a Bun fd
+    // (anything node:fs returned) is not there, and asking aborts the process.
+    if (!(fd >= 0 && fd <= 2)) {
+      return false;
+    }
     try {
       if (append_ask === null) {
         const crt = ffi.dlopen("ucrtbase.dll", {
@@ -58,11 +116,11 @@ function io_sys_win(ffi) {
   };
   const k32 = ffi.dlopen("kernel32.dll", spec(
     "CreateNamedPipeA:puuuuuup>U CreateFileA:puuuuup>U CloseHandle:U>i"
-    + " ConnectNamedPipe:Up>i ReadFile:Upuup>i WriteFile:Upuup>i"
-    + " PeekNamedPipe:Upupppp>i GetLastError:>u CreateEventA:piip>U"
+    + " ConnectNamedPipe:Up>i ReadFile:Upupp>i WriteFile:Upupp>i"
+    + " PeekNamedPipe:Upuppp>i GetLastError:>u CreateEventA:piip>U"
     + " WaitForSingleObject:Uu>u GetOverlappedResult:Uppi>i Sleep:u>"));
   const crt = ffi.dlopen("ucrtbase.dll", spec(
-    "_open_osfhandle:Ui>i _get_osfhandle:i>U _dup2:ii>i _setmaxstdio:i>i"));
+    "_open_osfhandle:Ui>i _get_osfhandle:i>U _dup2:ii>i _setmaxstdio:i>i _close:i>i"));
   const pipes = new Map();
   const fifos = new Map();
   const pipe_name = (path) => "\\\\.\\pipe\\bend"
@@ -72,16 +130,31 @@ function io_sys_win(ffi) {
   const ov_new = () => {
     const buf = new Uint8Array(32);
     const ev = k32.symbols.CreateEventA(null, 1, 0, null);
-    new DataView(buf.buffer).setBigUint64(16, ev, true);
+    // OVERLAPPED puts hEvent after the 8-byte union: offset 24 on a 64-bit
+    // pointer, 16 on a 32-bit one. Put it one word too early and the kernel
+    // reads a null handle, queues the completion to a port nobody watches,
+    // and the event never signals.
+    new DataView(buf.buffer).setBigUint64(process.arch === "ia32" ? 16 : 24, ev, true);
     return { buf, ev };
   };
   const fifo_io = (h, ptr, n, writing) => {
     const ov = ov_new();
     const got = new Uint32Array(1);
-    const ok = writing
-      ? k32.symbols.WriteFile(h, ptr, n, ffi.ptr(got), null)
-      : k32.symbols.ReadFile(h, ptr, n, ffi.ptr(got), ffi.ptr(ov.buf));
-    let e = ok ? 0 : k32.symbols.GetLastError();
+    let ok;
+    let e;
+    for (;;) {
+      ok = writing
+        ? k32.symbols.WriteFile(h, ptr, n, ffi.ptr(got), null)
+        : k32.symbols.ReadFile(h, ptr, n, ffi.ptr(got), ffi.ptr(ov.buf));
+      e = ok ? 0 : k32.symbols.GetLastError();
+      // A read end opened non-blocking and switched to blocking reaches here
+      // before its writer connects; a FIFO read waits for the writer.
+      if (!writing && e === 536) {
+        k32.symbols.Sleep(1);
+        continue;
+      }
+      break;
+    }
     if (!ok && e === 997) {
       k32.symbols.WaitForSingleObject(ov.ev, 0xFFFFFFFF);
       if (k32.symbols.GetOverlappedResult(h, ffi.ptr(ov.buf), ffi.ptr(got), 0)) {
@@ -150,10 +223,10 @@ function io_sys_win(ffi) {
     return fd;
   };
   globalThis.BEND_FIFO = fifos;
-  globalThis.BEND_FIFO_HAS = (path) => pipes.has(String(path));
+  globalThis.BEND_FIFO_HAS = (path) => pipes.has(as_path(path));
   globalThis.BEND_FIFO_OPEN = (path, mode) => {
     const flags = mode === "w" || mode === "a" || mode === "x" ? 1 : 0;
-    const fd = fifo_open(String(path), flags);
+    const fd = fifo_open(as_path(path), flags);
     return fd < 0 ? -1 : fd;
   };
   globalThis.BEND_FIFO_READ = (fd, buf) => {
@@ -270,11 +343,11 @@ function io_sys_win(ffi) {
     },
     close: (fd) => {
       if (fifos.has(fd)) {
+        // The fd came from _open_osfhandle, so only the CRT knows its
+        // handle; node:fs.closeSync would close an unrelated Bun fd and
+        // leak the pipe, keeping its name busy for the next instance.
         fifos.delete(fd);
-        try {
-          require("fs").closeSync(fd);
-        } catch (e) {
-        }
+        crt.symbols._close(fd);
         return 0;
       }
       const r = ws.symbols.closesocket(sok(fd));
@@ -289,6 +362,22 @@ function io_sys_win(ffi) {
       }
       pipes.set(key, pipe_name(key));
       return 0;
+    },
+    // POSIX unlink on a FIFO drops the name, not the open handles; the
+    // shim only carries the name, so forget it (and any real file).
+    unlink: (path) => {
+      const key = as_path(path).replace(/\0+$/, "");
+      const had = pipes.delete(key);
+      try {
+        require("fs").unlinkSync(key);
+        return 0;
+      } catch (e) {
+        if (had) {
+          return 0;
+        }
+        last.n = e.code === "ENOENT" ? 2 : 5;
+        return -1;
+      }
     },
     fifo_open: fifo_open,
     read: (fd, ptr, n) => {

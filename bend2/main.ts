@@ -36,10 +36,14 @@ const VERSION = "2.0.40";
 // "+win" prints bend <version>+win; upstream leaves it empty
 const BUILD = "";
 
+// --target android: the ABI is chosen by name, the NDK's clang does the rest
+let build_target = "";
+
 // the commands, one row each: [usage, what it does]; bend guide stays last
 const USAGE = [
   ["bend <file.bend> [args]", "check the file, then run main with args"],
   ["bend <file.bend> -o <out>", "build a binary, or C, JS, .mjs or BendTT by extension"],
+  ["bend <file.bend> --target android -o <out>", "cross-build for an Android phone (also android-x86_64, android-arm)"],
   ["bend <file.bend> --check-only", "check the file and its imports; run nothing"],
   ["bend <file.bend> --verdict", "check it, then recheck it with the proven kernel"],
   ["bend <file.bend> --publish [<name>@<version>]", "publish the file and its imports; a name needs login"],
@@ -266,6 +270,9 @@ async function cli_file(args: string[]): Promise<void> {
     } else if (a === "-o") {
       i += 1;
       outs.push(args[i] ?? cli_fail("-o needs an output file"));
+    } else if (a === "--target") {
+      i += 1;
+      build_target = args[i] ?? cli_fail("--target needs a target");
     } else if (a === "--") {
       argv.push(...args.splice(i + 1));
     } else if (a.startsWith("-")) {
@@ -297,6 +304,9 @@ async function cli_file(args: string[]): Promise<void> {
   if (checkup && outs.length !== 0) {
     cli_fail("--checkup takes no -o: a binary holds one main, so build each"
       + " import alone");
+  }
+  if (build_target !== "" && outs.length === 0) {
+    cli_fail("--target needs -o <out>");
   }
   try {
     if (file.endsWith(".html")) {
@@ -485,8 +495,85 @@ function cc_find(gpu: boolean): string {
     + " or newer to build " + (gpu ? "a GPU program" : "binaries") + " (found "
     + olds.join(", ") + "); on Debian/Ubuntu: curl -fsSL"
     + " https://apt.llvm.org/llvm.sh | sudo bash -s 19; on macOS: xcode-select"
-    + " --install; on Windows: install LLVM from https://llvm.org and put"
-    + " clang on PATH (GPU binaries need clang 19+)";
+    + " --install; on Windows: winget install --id=LLVM.LLVM -e, or"
+    + " winget install --id=MartinStorsjo.LLVM-MinGW.UCRT -e, then put clang"
+    + " on PATH (GPU binaries need clang 19+)";
+}
+
+// win_msvc_flags keeps a MinGW-default clang (MSYS2's, whose triple is
+// x86_64-w64-windows-gnu) usable for the Windows port. The generated C links
+// ws2_32 and friends with `#pragma comment`, which only an MSVC-target clang
+// honors, and it calls clock_gettime, which MinGW routes to winpthread.
+// Building for the MSVC ABI with the platform runtime links the VS CRT the
+// port already needs and drops clang's own builtins library, which the MSYS2
+// package ships only for its GNU triple.
+function win_msvc_flags(cc: string): string[] {
+  const got = child.spawnSync(cc, ["-dumpmachine"], { encoding: "utf8" });
+  const triple = `${got.stdout ?? ""}`.trim();
+  if (triple === "" || /windows-msvc/i.test(triple)) {
+    return [];
+  }
+  if (/mingw|windows-gnu|w64/i.test(triple)) {
+    return ["--target=x86_64-pc-windows-msvc", "-rtlib=platform"];
+  }
+  return [];
+}
+
+// msvc_lib finds the MSVC library directory that holds delayimp.lib (for a
+// GPU build's /DELAYLOAD): $LIB, then $VCToolsInstallDir, then the newest
+// MSVC of the Visual Studio that vswhere reports, so a plain shell with
+// clang on PATH still links.
+function msvc_lib(): string | undefined {
+  const dirs = (process.env.LIB ?? "").split(";").filter((d) => d !== "")
+    .concat(process.env.VCToolsInstallDir
+      ? [path.join(process.env.VCToolsInstallDir, "lib", "x64")] : []);
+  const vs = path.join(process.env["ProgramFiles(x86)"] ?? "C:/Program Files (x86)",
+    "Microsoft Visual Studio", "Installer", "vswhere.exe");
+  if (fs.existsSync(vs)) {
+    const got = child.spawnSync(vs, ["-latest", "-property", "installationPath"],
+      { encoding: "utf8" });
+    const root = `${got.stdout ?? ""}`.trim();
+    const tools = path.join(root, "VC", "Tools", "MSVC");
+    const names = root !== "" && fs.existsSync(tools) ? fs.readdirSync(tools) : [];
+    for (const name of names.sort().reverse()) {
+      dirs.push(path.join(tools, name, "lib", "x64"));
+    }
+  }
+  return dirs.map((d) => path.join(d, "delayimp.lib"))
+    .find((p) => fs.existsSync(p));
+}
+
+// android_cc finds the NDK's clang: $ANDROID_NDK_HOME, $ANDROID_NDK_ROOT,
+// then the newest ndk under $ANDROID_HOME, $ANDROID_SDK_ROOT or this user's
+// %LOCALAPPDATA%\Android\Sdk. Its driver finds its own sysroot, so the triple
+// rides as --target and nothing else is needed. bionic keeps pthreads in
+// libc, so the link takes -lm only.
+function android_cc(): string {
+  const roots = [process.env.ANDROID_NDK_HOME, process.env.ANDROID_NDK_ROOT]
+    .filter((d): d is string => d !== undefined && d !== "");
+  const sdks = [process.env.ANDROID_HOME, process.env.ANDROID_SDK_ROOT,
+    process.platform === "win32"
+      ? path.join(process.env.LOCALAPPDATA ?? "", "Android", "Sdk") : ""]
+    .filter((d): d is string => d !== undefined && d !== "");
+  for (const sdk of sdks) {
+    const ndk = path.join(sdk, "ndk");
+    if (fs.existsSync(ndk)) {
+      roots.push(...fs.readdirSync(ndk).sort().reverse().map((n) => path.join(ndk, n)));
+    }
+  }
+  for (const root of roots) {
+    const llvm = path.join(root, "toolchains", "llvm", "prebuilt");
+    const hosts = fs.existsSync(llvm) ? fs.readdirSync(llvm) : [];
+    for (const host of hosts) {
+      const cc = path.join(llvm, host, "bin",
+        "clang" + (process.platform === "win32" ? ".exe" : ""));
+      if (fs.existsSync(cc)) {
+        return cc;
+      }
+    }
+  }
+  throw "Error: bend needs the Android NDK to cross-build: set"
+    + " $ANDROID_NDK_HOME, or install one with Android Studio's SDK Manager";
 }
 
 // cli_build builds the C file at `file` into the binary `bin`. A `!` program
@@ -497,29 +584,51 @@ function cc_find(gpu: boolean): string {
 // (#import: a window, audio) builds as Objective-C; on Linux it links the
 // X11 (plus libdl, for dlopen before glibc 2.34) and ALSA libraries it
 // includes. On Windows the generated C pulls ws2_32, user32, gdi32 and winmm
-// with pragma comment, and the link gets a 256 MiB stack.
+// with pragma comment, and the link gets a 256 MiB stack. --target android
+// cross-builds a PIE for a phone instead: arm64 unless the name says
+// android-x86_64 or android-arm, the NDK's clang at API 21, and no X11, ALSA
+// or GPU lane (a ! runs on the phone's cores).
 // The GPU program's build runs without the user's $BENDRTS.
 function cli_build(bin: string, file: string): void {
   const c     = fs.readFileSync(file, "utf8");
   const mac   = process.platform === "darwin";
   const win   = process.platform === "win32";
+  const abi: Record<string, string> = { android: "aarch64-linux-android",
+    "android-arm64": "aarch64-linux-android",
+    "android-arm": "armv7a-linux-androideabi",
+    "android-x86_64": "x86_64-linux-android" };
+  if (build_target !== "" && abi[build_target] === undefined) {
+    cli_fail("unknown --target " + build_target
+      + " (android, android-arm64, android-arm, android-x86_64)");
+  }
+  const triple= abi[build_target] ?? "";
+  const droid = triple !== "";
+  if (droid && (c.includes("#include <X11/") || c.includes("#include <alsa/"))) {
+    cli_fail("the window and audio effects have no Android backend yet");
+  }
   const cuda  = [process.env.CUDA_HOME, process.env.CUDA_PATH,
     "/usr/local/cuda", "/opt/cuda"]
     .find(d => d && fs.existsSync(path.join(d, "include", "nvrtc.h"))) ?? "";
   const uses  = !/^#define BANGS\s+0$/m.test(c);
-  const bangs = uses && (mac || cuda !== "");
-  if (uses && !bangs) {
+  const bangs = !droid && uses && (mac || cuda !== "");
+  if (uses && !bangs && !droid) {
     cli_say(2, "bend: no CUDA toolkit (include/nvrtc.h under $CUDA_HOME,"
       + " $CUDA_PATH, /usr/local/cuda or /opt/cuda), so ! runs on the CPU\n");
   }
-  const cc    = cc_find(bangs);
+  if (uses && droid) {
+    cli_say(2, "bend: android has no GPU lane, so ! runs on the phone's cores\n");
+  }
+  const cc    = droid ? android_cc() : cc_find(bangs);
   const objc  = mac && (bangs || /^#import /m.test(c))
     ? ["-x", "objective-c", "-fobjc-arc", "-fmodules"] : [];
-  const libs  = win ? [] : [["X11", "X11", "dl"], ["alsa", "asound"]].flatMap(([h, ...ls]) =>
+  const libs  = win || droid ? [] : [["X11", "X11", "dl"], ["alsa", "asound"]].flatMap(([h, ...ls]) =>
     !mac && c.includes("#include <" + h + "/") ? ls.map((l) => "-l" + l) : []);
-  const out   = win && !/\.[A-Za-z0-9]+$/.test(bin) ? bin + ".exe" : bin;
-  const cpu = [...objc, "-std=c11", "-O3", file,
-    ...(win ? ["-Wl,/STACK:268435456"] : ["-lpthread", "-lm"]),
+  const out   = win && !droid && !/\.[A-Za-z0-9]+$/.test(bin) ? bin + ".exe" : bin;
+  const cpu = [...objc,
+    ...(droid ? ["--target=" + triple + "21"] : win ? win_msvc_flags(cc) : []),
+    "-std=c11", "-O3", file,
+    ...(win && !droid ? ["-Wl,/STACK:268435456"]
+      : droid ? ["-lm"] : ["-lpthread", "-lm"]),
     ...libs, "-o", path.resolve(out)];
   const gpu = mac ? ["-DBEND_METAL=1", ...cpu]
     : ["-DBEND_CUDA=1", "-I" + path.join(cuda, "include"),
@@ -530,12 +639,7 @@ function cli_build(bin: string, file: string): void {
         const dll = fs.existsSync(bin) ? fs.readdirSync(bin)
           .filter((n) => /^nvrtc64_\d+_\d+\.dll$/i.test(n)).sort().at(-1) : undefined;
         if (!dll) return [];
-        const roots = (process.env.LIB ?? "").split(";").concat(
-          process.env.VCToolsInstallDir
-            ? [path.join(process.env.VCToolsInstallDir, "lib", "x64")] : []);
-        const full = roots.map((d) => path.join(d, "delayimp.lib"))
-          .find((p) => p !== "delayimp.lib" && fs.existsSync(p));
-        return ["-Wl,/DELAYLOAD:" + dll, full ?? "delayimp.lib"];
+        return ["-Wl,/DELAYLOAD:" + dll, msvc_lib() ?? "delayimp.lib"];
       })() : [])];
   const steps: [string, string[]][] = bangs
     ? [[cc, gpu], [path.resolve(out), ["+RTS", "--gpu-build"]]] : [[cc, cpu]];

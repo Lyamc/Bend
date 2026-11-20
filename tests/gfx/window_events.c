@@ -86,6 +86,36 @@ Term feed_run(Env e, Term* f, IoWork* w) {
   return io_tup(e, f[0], io_str(e, "x11", 3));
 }
 
+#elif defined(_WIN32)
+
+#define FEED_T 4000000000u
+
+// Through window_pointer, so the WM_POINTER path itself is what is tested.
+static void feed_pointer(BendWin* win, u32 pid, u8 type, int x, int y,
+  u32 pressure, int tx, int ty, UINT msg, u32 ms) {
+  BendPointerFeed feed = { ms, type, x, y, pressure, 0, tx, ty };
+  window_feed = &feed;
+  window_pointer(win, msg, MAKEWPARAM(pid, 0));
+  window_feed = NULL;
+}
+
+Term feed_run(Env e, Term* f, IoWork* w) {
+  BendWin* win = (BendWin*)(uintptr_t)io_hand_v(f[0]);
+  feed_pointer(win, 21, PT_TOUCH, 10, 20, 1024, 0, 0, WM_POINTERDOWN, FEED_T + 1);
+  feed_pointer(win, 21, PT_TOUCH, 12, 20, 512, 0, 0, WM_POINTERUPDATE, FEED_T + 2);
+  feed_pointer(win, 21, PT_TOUCH, 12, 20, 0, 0, 0, WM_POINTERUP, FEED_T + 3);
+  feed_pointer(win, 22, PT_PEN, 30, 40, 0, 30, 0, WM_POINTERUPDATE, FEED_T + 4);
+  feed_pointer(win, 22, PT_PEN, 30, 40, 512, 30, 0, WM_POINTERDOWN, FEED_T + 5);
+  feed_pointer(win, 22, PT_PEN, 30, 40, 0, 30, 0, WM_POINTERUP, FEED_T + 6);
+  POINT pt = { 5, 6 };
+  ClientToScreen(win->hwnd, &pt);
+  SendMessageW(win->hwnd, WM_MOUSEWHEEL, MAKEWPARAM(0, 120),
+    MAKELPARAM(pt.x, pt.y));
+  SendMessageW(win->hwnd, WM_MOUSEHWHEEL, MAKEWPARAM(0, 120),
+    MAKELPARAM(pt.x, pt.y));
+  return io_tup(e, f[0], io_str(e, "win", 3));
+}
+
 #else
 
 Term feed_run(Env e, Term* f, IoWork* w) {

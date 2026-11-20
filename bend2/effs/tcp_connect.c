@@ -19,19 +19,21 @@ static Term tcp_connect_more(Env e, IoWork* w) {
 }
 
 Term tcp_connect_run(Env e, Term* f, IoWork* w) {
-  struct sockaddr_in at;
+  IoAddr at;
+  socklen_t alen = 0;
   w->data = io_cstr(e, f[0], &w->size);
   int fd  = -1;
   errno   = EINVAL;
-  if (!io_nul(w->data, w->size) && io_sys_addr(w->data, (u32)f[1], &at) == 0) {
-    fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (!io_nul(w->data, w->size)
+    && io_sys_addr(w->data, (u32)f[1], &at, &alen) == 0) {
+    fd = socket(at.v4.sin_family, SOCK_STREAM, 0);
   }
   if (fd >= 0 && fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) < 0) {
     close(fd);
     fd = -1;
   }
   w->made = fd;
-  io_sys_end(w, fd < 0 ? fd : connect(fd, (struct sockaddr*)&at, sizeof(at)));
+  io_sys_end(w, fd < 0 ? fd : connect(fd, (struct sockaddr*)&at, alen));
   // An interrupted connect goes on in the background, so it is waited on
   // as EINPROGRESS is; calling connect again would answer EALREADY.
   if (fd >= 0 && w->code == EINTR) {

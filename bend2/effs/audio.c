@@ -38,6 +38,10 @@ typedef struct {
   HWAVEOUT     unit;
   pthread_t    pump;
   _Atomic(u32) done;
+  // The chunk and its header outlive the pump thread: the device reads
+  // the chunk after the write returns, so neither may live on its stack.
+  float        out[256 * 2];
+  WAVEHDR      hdr;
 #endif
 } IoRing;
 
@@ -176,30 +180,36 @@ static void io_ring_free(IoRing* p) {
 #elif defined(_WIN32)
 
 // A thread feeds waveOut 256 float32 stereo frames at a time. The device
-// blocks in waveOutWrite, so the ring drains at the device's clock.
+// blocks in waveOutWrite, so the ring drains at the device's clock. The
+// header and its chunk live in the ring, not on the thread's stack: a
+// write returns while the device still reads the chunk.
 static void* io_ring_pump(void* ctx) {
   IoRing* p = ctx;
-  float   out[256 * 2];
-  WAVEHDR hdr = { 0 };
-  hdr.lpData = (LPSTR)out;
-  hdr.dwBufferLength = sizeof out;
+  p->hdr.lpData = (LPSTR)p->out;
+  p->hdr.dwBufferLength = sizeof p->out;
   while (atomic_load_explicit(&p->done, memory_order_relaxed) == 0) {
-    io_ring_pull(p, out, 256);
-    hdr.dwFlags = 0;
-    if (waveOutPrepareHeader(p->unit, &hdr, sizeof hdr) != MMSYSERR_NOERROR) {
+    io_ring_pull(p, p->out, 256);
+    p->hdr.dwFlags = 0;
+    if (waveOutPrepareHeader(p->unit, &p->hdr, sizeof p->hdr)
+        != MMSYSERR_NOERROR) {
       Sleep(5);
       continue;
     }
-    if (waveOutWrite(p->unit, &hdr, sizeof hdr) != MMSYSERR_NOERROR) {
-      waveOutUnprepareHeader(p->unit, &hdr, sizeof hdr);
+    if (waveOutWrite(p->unit, &p->hdr, sizeof p->hdr) != MMSYSERR_NOERROR) {
+      waveOutUnprepareHeader(p->unit, &p->hdr, sizeof p->hdr);
       Sleep(5);
       continue;
     }
-    while (!(hdr.dwFlags & WHDR_DONE)
-      && atomic_load_explicit(&p->done, memory_order_relaxed) == 0) {
+    while (!(p->hdr.dwFlags & WHDR_DONE)) {
+      // Asked to stop: the device still reads the chunk until the reset,
+      // which marks every pending buffer done and returns it.
+      if (atomic_load_explicit(&p->done, memory_order_relaxed) != 0) {
+        waveOutReset(p->unit);
+        break;
+      }
       Sleep(1);
     }
-    waveOutUnprepareHeader(p->unit, &hdr, sizeof hdr);
+    waveOutUnprepareHeader(p->unit, &p->hdr, sizeof p->hdr);
   }
   return NULL;
 }
@@ -227,10 +237,10 @@ static u32 io_ring_start(IoRing* p, u32 rate) {
 static void io_ring_free(IoRing* p) {
   if (p->unit != NULL) {
     atomic_store_explicit(&p->done, 1, memory_order_relaxed);
+    waveOutReset(p->unit);
     if (p->pump != 0) {
       pthread_join(p->pump, NULL);
     }
-    waveOutReset(p->unit);
     waveOutClose(p->unit);
   }
   free(p);

@@ -35,6 +35,20 @@ static Term file_read_start(Term file, u64 max, IoWork* w,
   IoCall call, IoPack pack) {
   w->hand = (intptr_t)io_hand_v(file);
   w->word = max < INT32_MAX ? max : INT32_MAX;
+#ifdef _WIN32
+  // The Windows CRT commits a malloc eagerly, and the upstream tests ask for
+  // caps of a gigabyte over files of a few bytes; a regular file answers at
+  // most st_size - at, so size the buffer to that tail (the JS lane does the
+  // same). Size 0 stays uncapped: it is a pipe, a device, or /proc.
+  struct stat st;
+  if (fstat((int)w->hand, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) {
+    u64 left = (u64)w->made >= (u64)st.st_size ? 0
+      : (u64)st.st_size - (u64)w->made;
+    if (left < w->word) {
+      w->word = left;
+    }
+  }
+#endif
   w->data = io_mem(malloc(w->word + 1));
   return io_work(w, call, pack);
 }
@@ -52,6 +66,7 @@ static Term file_read_pack(Env e, IoWork* w) {
 #ifdef CID(File.read)
 
 Term file_read_run(Env e, Term* f, IoWork* w) {
+  w->made = 0;
   return file_read_start(f[0], f[1], w, file_read_call, file_read_pack);
 }
 
@@ -68,6 +83,7 @@ static void file_read_line_call(IoWork* w) {
 }
 
 Term file_read_line_run(Env e, Term* f, IoWork* w) {
+  w->made = 0;
   return file_read_start(f[0], f[1], w, file_read_line_call, file_read_pack);
 }
 
@@ -90,6 +106,7 @@ static Term file_read_bytes_pack(Env e, IoWork* w) {
 #ifdef CID(File.read_bytes)
 
 Term file_read_bytes_run(Env e, Term* f, IoWork* w) {
+  w->made = 0;
   return file_read_start(f[0], f[1], w, file_read_call, file_read_bytes_pack);
 }
 

@@ -403,6 +403,48 @@ typedef struct {
   bool     tracked;
 } BendWin;
 
+// winmm-like effect sources are linked by pragma already; the input method
+// needs its own import library.
+#pragma comment(lib, "imm32.lib")
+
+// The monitor's refresh period in ns, so a window paces at the display's
+// rate as it does on X11 (CHANGELOG #1379). Remote or headless sessions do
+// not report a rate: fall back to 60 Hz.
+static u64 window_period(void) {
+  DEVMODEW dm;
+  memset(&dm, 0, sizeof dm);
+  dm.dmSize = sizeof dm;
+  if (EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &dm)
+    && dm.dmDisplayFrequency > 1 && dm.dmDisplayFrequency < 1000) {
+    u64 ns = 1000000000ULL / dm.dmDisplayFrequency;
+    if (ns >= 1000000 && ns <= 50000000) {
+      return ns;
+    }
+  }
+  return 16666667;
+}
+
+// Per-monitor DPI awareness (Windows 10 1703+), loaded by name so the same
+// binary still starts on older Windows. The value is the documented
+// DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 handle.
+static void window_dpi_aware(void) {
+  HMODULE u = GetModuleHandleW(L"user32.dll");
+  if (u == NULL) {
+    return;
+  }
+  BOOL (WINAPI *set_ctx)(void*) = (BOOL (WINAPI *)(void*))
+    GetProcAddress(u, "SetProcessDpiAwarenessContext");
+  if (set_ctx != NULL) {
+    set_ctx((void*)(intptr_t)-4);
+    return;
+  }
+  BOOL (WINAPI *set_pm)(void) = (BOOL (WINAPI *)(void))
+    GetProcAddress(u, "SetProcessDPIAware");
+  if (set_pm != NULL) {
+    set_pm();
+  }
+}
+
 static void window_view(BendWin* win) {
   u32 w = win->width, h = win->height;
   u32 cw = win->cw ? win->cw : w;
@@ -1325,6 +1367,122 @@ static void window_click(BendWin* win, int x, int y, u32 b, bool down) {
     GetTickCount(), b, down);
 }
 
+// Committed text from an input method (Chinese, Korean, Japanese, ...).
+// Only the result string is emitted: a composition preview would insert
+// text the user has not committed yet. Each UTF-16 unit goes through
+// window_char, which joins surrogate pairs as the WM_CHAR path does.
+static void window_ime(BendWin* win, HWND hwnd, UINT msg, LPARAM lp) {
+  HIMC himc = ImmGetContext(hwnd);
+  if (himc == NULL) {
+    return;
+  }
+  if (msg == WM_IME_ENDCOMPOSITION
+    || (msg == WM_IME_COMPOSITION && ((long)lp & GCS_RESULTSTR) != 0)) {
+    int bytes = ImmGetCompositionStringW(himc, GCS_RESULTSTR, NULL, 0);
+    if (bytes > 0) {
+      wchar_t* s = io_mem(malloc((size_t)bytes + sizeof(wchar_t)));
+      ImmGetCompositionStringW(himc, GCS_RESULTSTR, s, bytes);
+      s[bytes / (int)sizeof(wchar_t)] = 0;
+      for (int i = 0; i < bytes / (int)sizeof(wchar_t); i += 1) {
+        window_char(win, s[i]);
+      }
+      free(s);
+    }
+  }
+  ImmReleaseContext(hwnd, himc);
+}
+
+// A test seam: window_events.c points this at a stack value to feed synthetic
+// pointer events with a stable timestamp (no real touch screen needed). In a
+// program it stays NULL and the pointer API supplies everything.
+typedef struct {
+  u32 ms;
+  u8  type;
+  int x, y;             // already in the image's coordinates
+  u32 pressure;         // 0..1024
+  u32 rotation;
+  int tilt_x, tilt_y;
+} BendPointerFeed;
+static BendPointerFeed* window_feed;
+
+// Touch and pen input, which the legacy WM_MOUSE* messages never carry.
+// WM_POINTER messages also arrive for a mouse; those are dropped here so
+// the mouse keeps its single lane-0 id. A finger's last Press-up frees its
+// slot (window_keep), a pen keeps its slot for its next stroke.
+static void window_pointer(BendWin* win, UINT msg, WPARAM wp) {
+  u32 pid = LOWORD(wp);
+  u8 type;
+  f32 x, y;
+  u32 pressure = 0, rotation = 0;
+  int tilt_x = 0, tilt_y = 0;
+  f32 w = 1, h = 1;
+  if (window_feed != NULL) {
+    type = window_feed->type;
+    x = (f32)window_feed->x;
+    y = (f32)window_feed->y;
+    pressure = window_feed->pressure;
+    rotation = window_feed->rotation;
+    tilt_x = window_feed->tilt_x;
+    tilt_y = window_feed->tilt_y;
+  } else {
+    POINTER_INFO info;
+    if (!GetPointerInfo(pid, &info) || info.pointerType == PT_MOUSE) {
+      return;
+    }
+    type = info.pointerType;
+    POINT pt = info.ptPixelLocation;
+    ScreenToClient(win->hwnd, &pt);
+    x = ((f32)pt.x - (f32)win->vx) * win->sx;
+    y = ((f32)pt.y - (f32)win->vy) * win->sy;
+    if (type == PT_TOUCH) {
+      POINTER_TOUCH_INFO ti;
+      if (GetPointerTouchInfo(pid, &ti)) {
+        pressure = ti.pressure;
+        w = (f32)(ti.rcContact.right - ti.rcContact.left) / win->sx;
+        h = (f32)(ti.rcContact.bottom - ti.rcContact.top) / win->sy;
+      }
+    } else {
+      POINTER_PEN_INFO pi;
+      if (GetPointerPenInfo(pid, &pi)) {
+        pressure = pi.pressure;
+        rotation = pi.rotation;
+        tilt_x = pi.tiltX;
+        tilt_y = pi.tiltY;
+      }
+    }
+  }
+  bool touch = type == PT_TOUCH;
+  u64 name = 0x80000000ULL | pid;
+  WinTool tool;
+  memset(&tool, 0, sizeof tool);
+  if (touch) {
+    tool.tag = WIN_FINGER;
+    tool.v[0] = (f32)pressure / 1024.f;
+    tool.v[1] = w > 0 ? w : 1;
+    tool.v[2] = h > 0 ? h : tool.v[1];
+  } else {
+    tool.tag = WIN_PEN;
+    tool.v[0] = (f32)pressure / 1024.f;
+    tool.v[1] = (f32)rotation;
+    tool.v[2] = fmaxf(-90, fminf(90, (f32)tilt_x));
+    tool.v[3] = fmaxf(-90, fminf(90, (f32)tilt_y));
+  }
+  bool down = msg == WM_POINTERDOWN;
+  u32 slot = window_id(&win->q, name, down || msg == WM_POINTERUPDATE);
+  if (slot >= 16) {
+    return;
+  }
+  u32 ms = window_feed != NULL ? window_feed->ms : GetTickCount();
+  if (msg == WM_POINTERUP) {
+    window_point(&win->q, CID(Press), slot, tool, x, y, ms, 0, false);
+  } else if (msg == WM_POINTERUPDATE && !(win->q.down[slot] & 1)) {
+    window_point(&win->q, CID(Move), slot, tool, x, y, ms, 0, false);
+  } else {
+    window_point(&win->q, msg == WM_POINTERUPDATE ? CID(Move) : CID(Press),
+      slot, tool, x, y, ms, 0, down);
+  }
+}
+
 static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   BendWin* win = (BendWin*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
   if (win == NULL) {
@@ -1347,6 +1505,18 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     case WM_CHAR:
       window_char(win, (wchar_t)wp);
+      return 0;
+    case WM_IME_STARTCOMPOSITION:
+    case WM_IME_ENDCOMPOSITION:
+      window_ime(win, hwnd, msg, lp);
+      return DefWindowProcW(hwnd, msg, wp, lp);
+    case WM_IME_COMPOSITION:
+      window_ime(win, hwnd, msg, lp);
+      return 0;
+    case WM_POINTERDOWN:
+    case WM_POINTERUP:
+    case WM_POINTERUPDATE:
+      window_pointer(win, msg, wp);
       return 0;
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
@@ -1403,14 +1573,22 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         window_push(&win->q, CID(Leave), 0, 0, 0, 0);
       }
       return 0;
-    case WM_MOUSEWHEEL: {
+    case WM_MOUSEWHEEL:
+    case WM_MOUSEHWHEEL: {
       POINT pt = { (short)LOWORD(lp), (short)HIWORD(lp) };
       ScreenToClient(hwnd, &pt);
       f32 ix = ((f32)pt.x - (f32)win->vx) * win->sx;
       f32 iy = ((f32)pt.y - (f32)win->vy) * win->sy;
-      f32 s = (f32)GET_WHEEL_DELTA_WPARAM(wp) / 120.f;
+      f32 d = (f32)GET_WHEEL_DELTA_WPARAM(wp) / 120.f;
       window_push(&win->q, CID(Scroll), f32_rewrap(ix), f32_rewrap(iy),
-        f32_rewrap(0), f32_rewrap(s));
+        f32_rewrap(msg == WM_MOUSEHWHEEL ? d : 0),
+        f32_rewrap(msg == WM_MOUSEWHEEL ? d : 0));
+      return 0;
+    }
+    case WM_DPICHANGED: {
+      RECT* r = (RECT*)lp;
+      SetWindowPos(hwnd, NULL, r->left, r->top,
+        r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
       return 0;
     }
     case WM_SIZE:
@@ -1434,6 +1612,7 @@ static u32 window_make(const char* title, u32 w, u32 h, intptr_t* out,
   if (w < 1 || h < 1 || w > 16384 || h > 16384) {
     return EINVAL;
   }
+  window_dpi_aware();
   static ATOM cls;
   if (cls == 0) {
     WNDCLASSW wc = { 0 };
@@ -1475,7 +1654,7 @@ static u32 window_make(const char* title, u32 w, u32 h, intptr_t* out,
   win->cw = w;
   win->ch = h;
   win->pix = io_mem(calloc((size_t)w * h, 4));
-  win->period = 16666667;
+  win->period = window_period();
   win->style = GetWindowLongW(hwnd, GWL_STYLE);
   window_view(win);
   SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)win);

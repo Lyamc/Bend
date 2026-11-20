@@ -16,7 +16,7 @@ function udp_send_to_with(socket, host, port, data, b, k, at) {
   const intr = 4;
   const go = () => {
     while (true) {
-      const sent = sys.sendto(fd, b.length ? sys.ptr(b) : null, b.length, 0, sys.ptr(to), 16);
+      const sent = sys.sendto(fd, b.length ? sys.ptr(b) : null, b.length, 0, sys.ptr(to.buf), to.len);
       if (Number(sent) >= 0) {
         return io_tup(socket, io_ready(at, io_done({ $: CID(Unit) })));
       }

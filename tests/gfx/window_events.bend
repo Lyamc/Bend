@@ -39,14 +39,41 @@ def line(e: Event) -> String:
     case _:
       ""
 
-def lines(events: List<Event>, got: String) -> String:
+# On Windows the events are fed with a known time, so every line counts;
+# Scroll has no time of its own and carries the new horizontal delta.
+def line_win(e: Event) -> String:
+  match e:
+    case Press{id, t, x, y, +time, button, down}:
+      "press " ++ U32.show(id) ++ " " ++ tool(t) ++ " "
+        ++ F32.show(x) ++ " " ++ F32.show(y) ++ " " ++ U32.show(button) ++ " "
+        ++ Bool.show(down) ++ " " ++ U32.show(time) ++ "\n"
+    case Move{id, t, x, y, +time}:
+      "move " ++ U32.show(id) ++ " " ++ tool(t) ++ " "
+        ++ F32.show(x) ++ " " ++ F32.show(y) ++ " " ++ U32.show(time) ++ "\n"
+    case Scroll{x, y, dx, dy}:
+      "scroll " ++ F32.show(dx) ++ " " ++ F32.show(dy) ++ "\n"
+    case _:
+      ""
+
+def lines(events: List<Event>, got: String, +platform: String) -> String:
   match events:
     case Nil{}:
       got
     case e <> rest:
-      lines(rest, got ++ line(e))
+      show = Bool.pick(Event -> String, String.eq(platform, "win"),
+        line_win, line)
+      lines(rest, got ++ show(e), platform)
 
-def want(platform: String) -> String:
+def want(+platform: String) -> String:
+  Bool.pick(String, String.eq(platform, "win"),
+    "press 1 finger 100 10 20 0 True 4000000001\n"
+      ++ "move 1 finger 50 12 20 4000000002\n"
+      ++ "press 1 finger 0 12 20 0 False 4000000003\n"
+      ++ "move 1 pen 0 30 30 40 4000000004\n"
+      ++ "press 1 pen 50 30 30 40 0 True 4000000005\n"
+      ++ "press 1 pen 0 30 30 40 0 False 4000000006\n"
+      ++ "scroll 0 1\n"
+      ++ "scroll 1 0\n",
   Bool.pick(String, String.eq(platform, "mac"),
     "move 0 mouse 5 6 4000000007\n"
       ++ "press 0 mouse 5 6 0 True 4000000008\n"
@@ -59,7 +86,7 @@ def want(platform: String) -> String:
       ++ "press 1 pen 0 30 30 40 0 False 4000000006\n"
       ++ "move 0 mouse 5 6 4000000007\n"
       ++ "press 0 mouse 5 6 0 True 4000000008\n"
-      ++ "press 0 mouse 5 6 0 False 4000000009\n")
+      ++ "press 0 mouse 5 6 0 False 4000000009\n"))
 
 def report(window: Window, text: String) -> IO(Unit):
   do IO<Unit>:
@@ -80,7 +107,7 @@ def step(
   rest: Window -> String -> IO(Unit)
 ) -> IO(Unit):
   (window, image, events) = f
-  +now = lines(events, got)
+  +now = lines(events, got, platform)
   until(String.eq(now, want(platform)), window, now, rest)
 
 def watch(fuel: Nat, +platform: String, window: Window, got: String) ->

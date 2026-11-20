@@ -7,9 +7,9 @@
 // (io_str) or a List of bytes (io_list).
 static Term udp_recv_from_with(Env e, IoWork* w, IoPack more,
   Term (*read)(Env, const char*, u64)) {
-  struct sockaddr_in at = { 0 };
-  socklen_t alen = sizeof(at);
-  char      host[16];
+  IoAddr at = { 0 };
+  socklen_t alen = sizeof at;
+  char      host[INET6_ADDRSTRLEN];
   int       fd = (int)w->hand;
   ssize_t   n;
   do {
@@ -20,10 +20,16 @@ static Term udp_recv_from_with(Env e, IoWork* w, IoPack more,
   if (io_again(w)) {
     return io_wait_on(w, fd, POLLIN, w->time, more);
   }
-  inet_ntop(AF_INET, &at.sin_addr, host, 16);
+  int v6 = at.v4.sin_family == AF_INET6;
+  const void* addr = v6 ? (const void*)&at.v6.sin6_addr
+    : (const void*)&at.v4.sin_addr;
+  if (inet_ntop(v6 ? AF_INET6 : AF_INET, addr, host, sizeof host) == NULL) {
+    host[0] = 0;
+  }
+  u32 port = ntohs(v6 ? at.v6.sin6_port : at.v4.sin_port);
   Term r = io_poll_end(e, w, term_pak(CID(Unit), 0), io_res(e, w,
     io_tup(e, io_str(e, host, strlen(host)),
-      io_tup(e, ntohs(at.sin_port), read(e, w->data, w->size)))));
+      io_tup(e, port, read(e, w->data, w->size)))));
   free(w->data);
   return io_tup(e, io_hand(w->hand), r);
 }

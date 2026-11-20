@@ -2,6 +2,10 @@
 // ====
 
 function file_close(file) {
+  if (globalThis.BEND_STD?.has(file)) {
+    io_file_append.delete(file);
+    return { $: CID(Unit) };
+  }
   if (globalThis.BEND_ZERO?.has(file)) {
     globalThis.BEND_ZERO.delete(file);
     return { $: CID(Unit) };
