@@ -576,6 +576,25 @@ def Audio.close(audio: Audio) -> IO(Unit):
   import "./effs/audio.c"
   import "./effs/audio_close.js"
 
+# The names of the input devices, or Fail(ENOTSUP) where capture is absent.
+def Audio.devices() -> IO(Result<&1, &1, U32 & String, List<String>>):
+  import "./effs/audio_devices.c"
+  import "./effs/audio_devices.js"
+
+# Opens a named input device ("default" picks the system mapper). On a
+# machine with no input device the handle still reads silence.
+def Audio.open_input(device: String, rate: U32) ->
+  IO(Result<&1, &1, U32 & String, Audio>):
+  import "./effs/audio_open_input.c"
+  import "./effs/audio_open_input.js"
+
+# Up to max float samples captured from the input, threaded through the
+# handle outside the Result as every affine IO op does.
+def Audio.read(audio: Audio, max: U32) ->
+  IO(Audio & Result<&1, &1, U32 & String, List<&2, F32>>):
+  import "./effs/audio_read.c"
+  import "./effs/audio_read.js"
+
 # Equal
 # -----
 

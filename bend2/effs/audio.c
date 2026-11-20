@@ -1,6 +1,9 @@
 // Audio
 // =====
 
+#ifndef BEND_AUDIO_C
+#define BEND_AUDIO_C
+
 // The ring: 4096 float32 stereo frames. The effects fill it on the
 // evaluator's thread; the device's callback drains it and pads the
 // rest of its buffer with silence. All audio effects share this source;
@@ -42,6 +45,14 @@ typedef struct {
   // the chunk after the write returns, so neither may live on its stack.
   float        out[256 * 2];
   WAVEHDR      hdr;
+  HWAVEIN      in;
+  pthread_t    in_pump;
+  _Atomic(u32) in_done;
+  _Atomic(u64) cap_read, cap_written;
+  float        cap[IO_RING * 2];
+  short        in_pcm[256 * 2];
+  WAVEHDR      in_hdr;
+  u32          in_dev;
 #endif
 } IoRing;
 
@@ -214,6 +225,122 @@ static void* io_ring_pump(void* ctx) {
   return NULL;
 }
 
+// Capture is one waveIn buffer recycled by a pump thread. The device fills
+// 16-bit stereo; the pump converts it to float into a second ring, so a
+// read never waits on the device. A machine with no input device still
+// opens: reads answer silence, which keeps the tests and headless runs
+// deterministic.
+static void io_cap_pull(IoRing* p, float* out, u32 frames) {
+  u64 r = atomic_load_explicit(&p->cap_read, memory_order_relaxed);
+  u64 w = atomic_load_explicit(&p->cap_written, memory_order_acquire);
+  u32 n = (u32)(w - r < frames ? w - r : frames);
+  u32 at = (u32)(r % IO_RING);
+  u32 first = n < IO_RING - at ? n : IO_RING - at;
+  memcpy(out, p->cap + at * 2, first * 8);
+  memcpy(out + first * 2, p->cap, (n - first) * 8);
+  memset(out + n * 2, 0, (frames - n) * 8);
+  atomic_store_explicit(&p->cap_read, r + n, memory_order_release);
+}
+
+static void* io_cap_pump(void* ctx) {
+  IoRing* p = ctx;
+  WAVEHDR* h = &p->in_hdr;
+  h->lpData = (LPSTR)p->in_pcm;
+  h->dwBufferLength = sizeof p->in_pcm;
+  if (waveInPrepareHeader(p->in, h, sizeof *h) != MMSYSERR_NOERROR) {
+    return NULL;
+  }
+  if (waveInAddBuffer(p->in, h, sizeof *h) != MMSYSERR_NOERROR) {
+    waveInUnprepareHeader(p->in, h, sizeof *h);
+    return NULL;
+  }
+  waveInStart(p->in);
+  while (atomic_load_explicit(&p->in_done, memory_order_relaxed) == 0) {
+    if (!(h->dwFlags & WHDR_DONE)) {
+      Sleep(1);
+      continue;
+    }
+    float pcm[256 * 2];
+    u32 n = h->dwBytesRecorded / 4;
+    for (u32 i = 0; i < n && i < 256 * 2; i += 1) {
+      pcm[i] = (float)p->in_pcm[i] / 32768.f;
+    }
+    u64 w = atomic_load_explicit(&p->cap_written, memory_order_relaxed);
+    u64 r = atomic_load_explicit(&p->cap_read, memory_order_acquire);
+    if (w - r + n / 2 <= IO_RING) {
+      u32 at = (u32)(w % IO_RING);
+      u32 first = n / 2 < IO_RING - at ? n / 2 : IO_RING - at;
+      memcpy(p->cap + at * 2, pcm, first * 8);
+      memcpy(p->cap, pcm + first * 2, (n / 2 - first) * 8);
+      atomic_store_explicit(&p->cap_written, w + n / 2, memory_order_release);
+    }
+    h->dwFlags = 0;
+    h->dwBytesRecorded = 0;
+    if (waveInAddBuffer(p->in, h, sizeof *h) != MMSYSERR_NOERROR) {
+      break;
+    }
+  }
+  waveInStop(p->in);
+  waveInReset(p->in);
+  waveInUnprepareHeader(p->in, h, sizeof *h);
+  waveInClose(p->in);
+  return NULL;
+}
+
+static u32 io_capture_start(IoRing* p, const char* name, u32 rate) {
+  WAVEFORMATEX fmt = { 0 };
+  fmt.wFormatTag      = WAVE_FORMAT_PCM;
+  fmt.nChannels       = 2;
+  fmt.nSamplesPerSec  = rate;
+  fmt.wBitsPerSample  = 16;
+  fmt.nBlockAlign     = 4;
+  fmt.nAvgBytesPerSec = rate * 4;
+  UINT n = waveInGetNumDevs();
+  UINT dev = WAVE_MAPPER;
+  if (name != NULL && name[0] != 0 && strcmp(name, "default") != 0) {
+    dev = n;
+    for (UINT i = 0; i < n; i += 1) {
+      WAVEINCAPSW cap;
+      if (waveInGetDevCapsW(i, &cap, sizeof cap) != MMSYSERR_NOERROR) {
+        continue;
+      }
+      char utf[sizeof cap.szPname * 3];
+      int k = WideCharToMultiByte(CP_UTF8, 0, cap.szPname, -1, utf,
+        sizeof utf, NULL, NULL);
+      if (k > 0 && strcmp(utf, name) == 0) {
+        dev = i;
+        break;
+      }
+    }
+    if (dev == n) {
+      return ENODEV;
+    }
+  } else if (n == 0) {
+    // No device: a silent capture still answers reads.
+    return 0;
+  }
+  if (waveInOpen(&p->in, dev, &fmt, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
+    return ENODEV;
+  }
+  p->in_dev = dev;
+  if (pthread_create(&p->in_pump, NULL, io_cap_pump, p) != 0) {
+    waveInClose(p->in);
+    p->in = NULL;
+    return ENODEV;
+  }
+  return 0;
+}
+
+static void io_capture_free(IoRing* p) {
+  if (p->in != NULL) {
+    atomic_store_explicit(&p->in_done, 1, memory_order_relaxed);
+    if (p->in_pump != 0) {
+      pthread_join(p->in_pump, NULL);
+    }
+    p->in = NULL;
+  }
+}
+
 static u32 io_ring_start(IoRing* p, u32 rate) {
   WAVEFORMATEX fmt = { 0 };
   fmt.wFormatTag      = WAVE_FORMAT_IEEE_FLOAT;
@@ -235,6 +362,7 @@ static u32 io_ring_start(IoRing* p, u32 rate) {
 }
 
 static void io_ring_free(IoRing* p) {
+  io_capture_free(p);
   if (p->unit != NULL) {
     atomic_store_explicit(&p->done, 1, memory_order_relaxed);
     waveOutReset(p->unit);
@@ -312,4 +440,6 @@ Term audio_close_run(Env e, Term* f, IoWork* w) {
 static void __attribute__((constructor)) audio_close_use(void) {
   io_eff(CID(Audio.close), audio_close_run);
 }
+#endif
+
 #endif
